@@ -65,6 +65,7 @@ enum MicroOp {
     SetAutoIncrementFlag,
     ClearAutoIncrementFlag,
     FetchValue,
+    FetchDestSrc,
     FetchLowAddress,
     FetchHighAddress,
     FetchIndirectLowAddress,
@@ -75,6 +76,7 @@ enum MicroOp {
     AbsoluteToRegister,
     IndexedAddress,
     AddWithoutCarryRegister,
+    AddWithoutCarryImmediate,
 }
 
 /* CPU registers. Duh. */
@@ -94,6 +96,7 @@ struct StateMachine {
     micro_ops: Vec<MicroOp>,
     index: usize,
     value_register: u8,
+    dest_src_register: u8,
     address_register: u16,
     indirect_address_register: u16,
 }
@@ -104,6 +107,7 @@ impl StateMachine {
             micro_ops: vec![],
             index: 0,
             value_register: 0,
+            dest_src_register: 0,
             address_register: 0,
             indirect_address_register: 0,
         }
@@ -131,16 +135,16 @@ impl Registers {
         self.flags & NEGATIVE_FLAG != 0
     }
 
+    fn carry_flag(&self) -> bool {
+        self.flags & CARRY_FLAG != 0
+    }
+
+    fn overflow_flag(&self) -> bool {
+        self.flags & OVERFLOW_FLAG != 0
+    }
+
     fn auto_increment_flag(&self) -> bool {
         self.flags & AUTO_INCREMENT_FLAG != 0
-    }
-
-    fn set_auto_increment_flag(&mut self) {
-        self.flags |= AUTO_INCREMENT_FLAG;
-    }
-
-    fn clear_autoincrement_flag(&mut self) {
-        self.flags &= !AUTO_INCREMENT_FLAG;
     }
 
     fn set_zero_negative_flags(&mut self, value: u8) {
@@ -163,6 +167,42 @@ impl Registers {
             self.flags &= !NEGATIVE_FLAG;
         }
     }
+
+    fn set_carry_flag(&mut self, result: u16) {
+        if result > 255 {
+            self.flags |= CARRY_FLAG;
+        } else {
+            self.flags &= !CARRY_FLAG;
+        }
+    }
+
+    /*
+        overflow happens if both src values have same sign (8th bit set/unset in
+        both), and the sign bit in in the result is different --> operation
+        on two positive values resulted in negative number, or other way around
+    */
+    fn set_overflow_flag(
+        &mut self,
+        src1: u8,
+        src2: u8,
+        result: u16) {
+        let same_sign = (0x80 & src1) == (0x80 & src2);
+        let src_dst_differs = (0x80 & src1) != (0x80 & result) as u8;
+        if same_sign && src_dst_differs {
+            self.flags |= OVERFLOW_FLAG;
+        } else {
+            self.flags &= !OVERFLOW_FLAG;
+        }
+    }
+
+    fn set_auto_increment_flag(&mut self) {
+        self.flags |= AUTO_INCREMENT_FLAG;
+    }
+
+    fn clear_autoincrement_flag(&mut self) {
+        self.flags &= !AUTO_INCREMENT_FLAG;
+    }
+
 }
 
 pub struct Cpu {
@@ -263,29 +303,36 @@ impl Cpu {
     fn decode_ldr(&mut self, addressing: u8) {
         match addressing & 0x03 {
             IMMEDIATE_ADDRESSING => {
-                self.state.micro_ops.push(MicroOp::FetchValue);
+                self.state.micro_ops.push(MicroOp::FetchDestSrc);
                 self.state.micro_ops.push(MicroOp::ImmedateToRegister);
             },
             ABSOLUTE_ADDRESSING => {
-                self.state.micro_ops.push(MicroOp::FetchValue);
+                self.state.micro_ops.push(MicroOp::FetchDestSrc);
                 self.state.micro_ops.push(MicroOp::FetchLowAddress);
                 self.state.micro_ops.push(MicroOp::FetchHighAddress);
                 self.state.micro_ops.push(MicroOp::AbsoluteToRegister);
             },
             INDEXED_ABSOLUTE_ADDRESSING => {
-                self.state.micro_ops.push(MicroOp::FetchValue);
+                self.state.micro_ops.push(MicroOp::FetchDestSrc);
                 self.state.micro_ops.push(MicroOp::FetchLowAddress);
                 self.state.micro_ops.push(MicroOp::FetchHighAddress);
                 self.state.micro_ops.push(MicroOp::IndexedAddress);
                 self.state.micro_ops.push(MicroOp::AbsoluteToRegister);
             },
             INDIRECT_ADDRESSING => {
-                self.state.micro_ops.push(MicroOp::FetchValue);
+                self.state.micro_ops.push(MicroOp::FetchDestSrc);
                 self.state.micro_ops.push(MicroOp::FetchLowAddress);
                 self.state.micro_ops.push(MicroOp::FetchHighAddress);
                 self.state.micro_ops.push(MicroOp::FetchIndirectLowAddress);
                 self.state.micro_ops.push(MicroOp::FetchIndirectHighAddress);
                 self.state.micro_ops.push(MicroOp::AbsoluteToRegister);
+
+                if self.registers.auto_increment_flag() {
+                    self.state.micro_ops.push(
+                        MicroOp::IncrementAndStoreIndirectLowByte);
+                    self.state.micro_ops.push(
+                        MicroOp::StoreIndirectHighByte);
+                }
             },
             _ => unreachable!(),
         }
@@ -294,11 +341,13 @@ impl Cpu {
     fn decode_add(&mut self, addressing: u8) {
         match addressing & 0x01 {
             REGISTER_REGISTER_ADDRESSING => {
-                self.state.micro_ops.push(MicroOp::FetchValue);
+                self.state.micro_ops.push(MicroOp::FetchDestSrc);
                 self.state.micro_ops.push(MicroOp::AddWithoutCarryRegister);
             },
             REGISTER_IMMEDIATE_ADDRESSING => {
-                unimplemented!();
+                self.state.micro_ops.push(MicroOp::FetchDestSrc);
+                self.state.micro_ops.push(MicroOp::FetchValue);
+                self.state.micro_ops.push(MicroOp::AddWithoutCarryImmediate);
             },
             _ => unreachable!(),
         }
@@ -326,6 +375,9 @@ impl Cpu {
             },
             MicroOp::FetchValue => {
                 self.state.value_register = self.read_pc();
+            }
+            MicroOp::FetchDestSrc => {
+                self.state.dest_src_register = self.read_pc();
             },
             MicroOp::FetchLowAddress => {
                 self.state.address_register = self.read_pc() as u16;
@@ -345,13 +397,6 @@ impl Cpu {
                 self.state.address_register |=
                     (self.read(self.state.indirect_address_register) as u16)
                     << 8;
-
-                if self.registers.auto_increment_flag() {
-                    self.state.micro_ops.push(
-                        MicroOp::IncrementAndStoreIndirectLowByte);
-                    self.state.micro_ops.push(
-                        MicroOp::StoreIndirectHighByte);
-                }
             },
             MicroOp::IncrementAndStoreIndirectLowByte => {
                 self.state.address_register =
@@ -369,16 +414,16 @@ impl Cpu {
             },
             MicroOp::ImmedateToRegister => {
                 let immediate = self.read_pc();
-                let destination = self.state.value_register & 0x03;
+                let destination = self.state.dest_src_register & 0x03;
                 self.store_register(destination, immediate);
             },
             MicroOp::AbsoluteToRegister => {
                 let value = self.read(self.state.address_register);
-                let destination = self.state.value_register & 0x03;
+                let destination = self.state.dest_src_register & 0x03;
                 self.store_register(destination, value);
             },
             MicroOp::IndexedAddress => {
-                let index_reg = (self.state.value_register >> 2) & 0x03;
+                let index_reg = (self.state.dest_src_register >> 2) & 0x03;
                 let value = self.load_register(index_reg);
                 self.state.address_register += value as u16;
 
@@ -389,15 +434,32 @@ impl Cpu {
                 }
             },
             MicroOp::AddWithoutCarryRegister => {
-                let destination = self.state.value_register & 0x03;
-                let src1 = (self.state.value_register >> 2) & 0x03;
-                let src2 = (self.state.value_register >> 4) & 0x03;
+                let destination = self.state.dest_src_register & 0x03;
+                let src1 = (self.state.dest_src_register >> 2) & 0x03;
+                let src2 = (self.state.dest_src_register >> 4) & 0x03;
 
                 let src1val = self.load_register(src1);
                 let src2val = self.load_register(src2);
                 let result = src1val as u16 + src2val as u16;
+
+                self.registers.set_carry_flag(result);
+                self.registers.set_overflow_flag(src1val, src2val, result);
+
                 self.store_register(destination, result as u8);
-            }
+            },
+            MicroOp::AddWithoutCarryImmediate => {
+                let destination = self.state.dest_src_register & 0x03;
+                let src1 = (self.state.dest_src_register >> 2) & 0x03;
+
+                let src1val = self.load_register(src1);
+                let src2val = self.state.value_register;
+                let result = src1val as u16 + src2val as u16;
+
+                self.registers.set_carry_flag(result);
+                self.registers.set_overflow_flag(src1val, src2val, result);
+
+                self.store_register(destination, result as u8);
+            },
         }
 
         self.state.index += 1;
@@ -498,6 +560,18 @@ mod tests {
             (destination & 0x03) |
             ((src_1 & 0x03) << 2) |
             ((src_2 & 0x03) << 4));
+    }
+
+    fn emit_add_without_carry_reg_immediate(
+        opcodes: &mut Vec<u8>,
+        destination: u8,
+        src_1: u8,
+        immediate: u8) {
+        opcodes.push((ADD_WITHOUT_CARRY << 2) | REGISTER_IMMEDIATE_ADDRESSING);
+        opcodes.push(
+            (destination & 0x03) |
+            ((src_1 & 0x03) << 2));
+        opcodes.push(immediate);
     }
 
 
@@ -942,14 +1016,189 @@ mod tests {
     }
 
     #[test]
-    fn add_without_carry_reg_immediate_computes_correct_value_when_carry_set() {
+    fn add_without_carry_reg_reg_result_overflows_correctly() {
         let mut cpu = create_test_cpu();
         let mut program = vec![];
         emit_add_without_carry_reg_reg(
             &mut program,
             ENCODING_R1,
             ENCODING_R2,
+            ENCODING_R3);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 0x49;
+        cpu.registers.r2 = 0xC8;
+        cpu.registers.r3 = 0x8C;
+        cpu.registers.flags = 0;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0x54, cpu.registers.r1);
+    }
+
+    #[test]
+    fn add_without_carry_reg_reg_sets_and_clears_zero_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+        emit_add_without_carry_reg_reg(
+            &mut program,
+            ENCODING_R1,
+            ENCODING_R2,
+            ENCODING_R3);
+        emit_add_without_carry_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 0x40;
+        cpu.registers.r2 = 0x05;
+        cpu.registers.r3 = 0x02;
+        cpu.registers.flags = ZERO_FLAG;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.zero_flag());
+
+        cpu.registers.r4 = 0x0;
+        cpu.registers.r3 = 0x0;
+        cpu.registers.r2 = 0x0;
+
+        cpu.registers.flags = 0;
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.zero_flag());
+    }
+
+    #[test]
+    fn add_without_carry_reg_reg_sets_and_clears_negative_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+        emit_add_without_carry_reg_reg(
+            &mut program,
+            ENCODING_R1,
+            ENCODING_R2,
+            ENCODING_R3);
+        emit_add_without_carry_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 0x40;
+        cpu.registers.r2 = 0x05;
+        cpu.registers.r3 = 0x02;
+        cpu.registers.flags = NEGATIVE_FLAG;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.negative_flag());
+
+        cpu.registers.r4 = 0x0;
+        cpu.registers.r3 = 0x5A;
+        cpu.registers.r2 = 0x41;
+
+        cpu.registers.flags = 0;
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.negative_flag());
+    }
+
+    #[test]
+    fn add_without_carry_reg_reg_sets_and_clears_carry_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+        emit_add_without_carry_reg_reg(
+            &mut program,
+            ENCODING_R1,
+            ENCODING_R2,
+            ENCODING_R3);
+        emit_add_without_carry_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 0x40;
+        cpu.registers.r2 = 0x05;
+        cpu.registers.r3 = 0x02;
+        cpu.registers.flags = CARRY_FLAG;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.carry_flag());
+
+        cpu.registers.r4 = 0x0;
+        cpu.registers.r3 = 0x8C;
+        cpu.registers.r2 = 0xC8;
+
+        cpu.registers.flags = 0;
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.carry_flag());
+    }
+
+    #[test]
+    fn add_without_carry_reg_reg_sets_and_clears_overflow_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+        // clear flag
+        emit_add_without_carry_reg_reg(
+            &mut program,
+            ENCODING_R1,
+            ENCODING_R2,
+            ENCODING_R3);
+        // overflow set when both values > 127
+        emit_add_without_carry_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2);
+        // overflow set when both values < 127
+        emit_add_without_carry_reg_reg(
+            &mut program,
+            ENCODING_R2,
+            ENCODING_R3,
+            ENCODING_R4);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 0x0;
+        cpu.registers.r2 = 0x8C;
+        cpu.registers.r3 = 0x19;
+        cpu.registers.flags = OVERFLOW_FLAG;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.overflow_flag());
+
+        cpu.registers.r4 = 0x0;
+        cpu.registers.r3 = 0x8C;
+        cpu.registers.r2 = 0xC8;
+
+        cpu.registers.flags = 0;
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.overflow_flag());
+
+
+        cpu.registers.r2 = 0x0;
+        cpu.registers.r3 = 0x7F;
+        cpu.registers.r4 = 0x20;
+
+        cpu.registers.flags = 0;
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.overflow_flag());
+    }
+
+    #[test]
+    fn add_without_carry_reg_immediate_computes_correct_value_when_carry_set() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_add_without_carry_reg_immediate(
+            &mut program,
+            ENCODING_R1,
+            ENCODING_R2,
             0x02);
+
         update_program(&mut cpu, program, 0x2000);
 
         cpu.registers.r1 = 0x40;
@@ -958,6 +1207,173 @@ mod tests {
 
         execute_instruction(&mut cpu);
         assert_eq!(0x07, cpu.registers.r1);
+    }
+
+    #[test]
+    fn add_without_carry_reg_immediate_overflows_correctly() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_add_without_carry_reg_immediate(
+            &mut program,
+            ENCODING_R1,
+            ENCODING_R2,
+            0x8C);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 0x40;
+        cpu.registers.r2 = 0x9A;
+        cpu.registers.flags = CARRY_FLAG;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0x26, cpu.registers.r1);
+    }
+
+
+
+    #[test]
+    fn add_without_carry_reg_immediate_sets_and_clears_zero_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+        emit_add_without_carry_reg_immediate(
+            &mut program,
+            ENCODING_R1,
+            ENCODING_R2,
+            0x02);
+        emit_add_without_carry_reg_immediate(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            0x00);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 0x40;
+        cpu.registers.r2 = 0x05;
+        cpu.registers.flags = ZERO_FLAG;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.zero_flag());
+
+        cpu.registers.r4 = 0x0;
+        cpu.registers.r3 = 0x0;
+
+        cpu.registers.flags = 0;
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.zero_flag());
+    }
+
+    #[test]
+    fn add_without_carry_reg_immediate_sets_and_clears_negative_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+        emit_add_without_carry_reg_immediate(
+            &mut program,
+            ENCODING_R1,
+            ENCODING_R2,
+            0x02);
+        emit_add_without_carry_reg_immediate(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            0x41);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 0x40;
+        cpu.registers.r2 = 0x05;
+        cpu.registers.flags = NEGATIVE_FLAG;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.negative_flag());
+
+        cpu.registers.r4 = 0x0;
+        cpu.registers.r3 = 0x5A;
+
+        cpu.registers.flags = 0;
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.negative_flag());
+    }
+
+    #[test]
+    fn add_without_carry_reg_immediate_sets_and_clears_carry_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+        emit_add_without_carry_reg_immediate(
+            &mut program,
+            ENCODING_R1,
+            ENCODING_R2,
+            0x02);
+        emit_add_without_carry_reg_immediate(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            0xC8);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 0x40;
+        cpu.registers.r2 = 0x05;
+        cpu.registers.flags = CARRY_FLAG;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.carry_flag());
+
+        cpu.registers.r4 = 0x0;
+        cpu.registers.r3 = 0x8C;
+
+        cpu.registers.flags = 0;
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.carry_flag());
+    }
+
+    #[test]
+    fn add_without_carry_reg_immediate_sets_and_clears_overflow_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+        // clear flag
+        emit_add_without_carry_reg_immediate(
+            &mut program,
+            ENCODING_R1,
+            ENCODING_R2,
+            0x19);
+        // overflow set when both values > 127
+        emit_add_without_carry_reg_immediate(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            0xC8);
+        // overflow set when both values < 127
+        emit_add_without_carry_reg_immediate(
+            &mut program,
+            ENCODING_R2,
+            ENCODING_R3,
+            0x20);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 0x0;
+        cpu.registers.r2 = 0x8C;
+        cpu.registers.flags = OVERFLOW_FLAG;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.overflow_flag());
+
+        cpu.registers.r4 = 0x0;
+        cpu.registers.r3 = 0x8C;
+
+        cpu.registers.flags = 0;
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.overflow_flag());
+
+
+        cpu.registers.r2 = 0x0;
+        cpu.registers.r3 = 0x7F;
+
+        cpu.registers.flags = 0;
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.overflow_flag());
     }
 
 }
