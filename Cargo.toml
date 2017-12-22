@@ -1,0 +1,11 @@
+[package]
+name = "retro_console"
+version = "0.1.0"
+authors = ["Valtis <erkka_kaaria@outlook.com>"]
+
+[[bin]]
+name = "retro_console"
+
+[dependencies]
+time = "*"
+sdl2 = "*"
