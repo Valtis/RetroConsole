@@ -7,5 +7,5 @@ authors = ["Valtis <erkka_kaaria@outlook.com>"]
 name = "retro_console"
 
 [dependencies]
-time = "*"
-sdl2 = "*"
+time = "0.1.38"
+sdl2 = "0.31.0"
