@@ -1,3 +1,4 @@
+
 use memory_controller::MemoryController;
 use std::rc::Rc;
 use std::cell::RefCell;
@@ -44,6 +45,9 @@ const STORE_REGISTER: u8 = 0x11;
 const ADD_WITH_CARRY:u8 = 0x30;
 const ADD_WITHOUT_CARRY: u8 = 0x31;
 
+const SIGNED_MULTIPLY: u8 = 0x34;
+const UNSIGNED_MULTIPLY:u8 = 0x35;
+
 
 
 /* Flag instructions */
@@ -62,6 +66,7 @@ const SP_INITIAL_VALUE: u16 = 0x200;
 */
 #[derive(Clone, Copy)]
 enum MicroOp {
+    Nop,
     SetAutoIncrementFlag,
     ClearAutoIncrementFlag,
     FetchValue,
@@ -77,6 +82,15 @@ enum MicroOp {
     IndexedAddress,
     AddWithoutCarryRegister,
     AddWithoutCarryImmediate,
+    BeginMultiply,
+    SignedMultiplyInvertNegativeMultiplier,
+    SignedMultiplyInvertNegativeMultiplicand,
+    MultiplyAdd,
+    MultiplyShiftMultiplier,
+    MultiplyShiftMultiplicand,
+    SignedMultiplyInvertResultIfFlag,
+    EndSignedMultiply,
+    EndUnsignedMultiply,
 }
 
 /* CPU registers. Duh. */
@@ -99,6 +113,7 @@ struct StateMachine {
     dest_src_register: u8,
     address_register: u16,
     indirect_address_register: u16,
+    multiply_negate: bool,
 }
 
 impl StateMachine {
@@ -110,6 +125,7 @@ impl StateMachine {
             dest_src_register: 0,
             address_register: 0,
             indirect_address_register: 0,
+            multiply_negate: false,
         }
     }
 }
@@ -148,19 +164,27 @@ impl Registers {
     }
 
     fn set_zero_negative_flags(&mut self, value: u8) {
-        self.set_zero_flag(value);
-        self.set_negative_flag(value);
+        self.set_zero_flag_on_value(value);
+        self.set_negative_flag_on_value(value);
     }
 
-    fn set_zero_flag(&mut self, value: u8) {
+    fn set_zero_flag_on_value(&mut self, value: u8) {
         if value == 0 {
-            self.flags |= ZERO_FLAG;
+            self.set_zero_flag();
         } else {
-            self.flags &= !ZERO_FLAG;
+            self.clear_zero_flag();
         }
     }
 
-    fn set_negative_flag(&mut self, value: u8) {
+    fn set_zero_flag(&mut self) {
+        self.flags |= ZERO_FLAG;
+    }
+
+    fn clear_zero_flag(&mut self) {
+        self.flags &= !ZERO_FLAG;
+    }
+
+    fn set_negative_flag_on_value(&mut self, value: u8) {
         if value > 127 {
             self.flags |= NEGATIVE_FLAG;
         } else {
@@ -168,12 +192,20 @@ impl Registers {
         }
     }
 
-    fn set_carry_flag(&mut self, result: u16) {
+    fn set_carry_flag_on_value(&mut self, result: u16) {
         if result > 255 {
-            self.flags |= CARRY_FLAG;
+            self.set_carry_flag();
         } else {
-            self.flags &= !CARRY_FLAG;
+            self.clear_carry_flag();
         }
+    }
+
+    fn set_carry_flag(&mut self) {
+        self.flags |= CARRY_FLAG;
+    }
+
+    fn clear_carry_flag(&mut self) {
+        self.flags &= !CARRY_FLAG;
     }
 
     /*
@@ -181,7 +213,7 @@ impl Registers {
         both), and the sign bit in in the result is different --> operation
         on two positive values resulted in negative number, or other way around
     */
-    fn set_overflow_flag(
+    fn set_overflow_flag_on_value(
         &mut self,
         src1: u8,
         src2: u8,
@@ -189,10 +221,18 @@ impl Registers {
         let same_sign = (0x80 & src1) == (0x80 & src2);
         let src_dst_differs = (0x80 & src1) != (0x80 & result) as u8;
         if same_sign && src_dst_differs {
-            self.flags |= OVERFLOW_FLAG;
+            self.set_overflow_flag();
         } else {
-            self.flags &= !OVERFLOW_FLAG;
+            self.clear_overflow_flag();
         }
+    }
+
+    fn set_overflow_flag(&mut self) {
+        self.flags |= OVERFLOW_FLAG;
+    }
+
+    fn clear_overflow_flag(&mut self) {
+        self.flags &= !OVERFLOW_FLAG;
     }
 
     fn set_auto_increment_flag(&mut self) {
@@ -216,29 +256,17 @@ impl Cpu {
         // temp code: create test program for the cpu
 
       let temp_instructions = vec![
-            // LDR r1, #$FA
+            // LDR r1, #$FF
             (LOAD_REGISTER << 2) | IMMEDIATE_ADDRESSING,
             ENCODING_R1,
-            0xFA,
-            // LDR r2, $1234
-            (LOAD_REGISTER << 2) | ABSOLUTE_ADDRESSING,
-            ENCODING_R2,
-            0x34,
-            0x12,
-            // LDR r3, #$1
+            (8 as u8).wrapping_neg(),
+            // LDR r1, #$03
             (LOAD_REGISTER << 2) | IMMEDIATE_ADDRESSING,
-            ENCODING_R3,
-            0x01,
-            // LDR r1, $1234, r3
-            (LOAD_REGISTER << 2) | INDEXED_ABSOLUTE_ADDRESSING,
-            ENCODING_R1 | (ENCODING_R3 << 2),
-            0x34,
-            0x12,
-            // LDR r4, [$ABCD]
-            (LOAD_REGISTER << 2) | INDIRECT_ADDRESSING,
-            ENCODING_R4,
-            0xCD,
-            0xAB,
+            ENCODING_R2,
+            0x09,
+            // MUL r4, r3, r2, r1
+            (SIGNED_MULTIPLY << 2) | REGISTER_REGISTER_ADDRESSING,
+            0b00011011
         ];
 
         for (i, v) in temp_instructions.iter().enumerate() {
@@ -272,8 +300,6 @@ impl Cpu {
     }
 
     pub fn execute(&mut self) {
-
-
         if self.state.index == self.state.micro_ops.len() {
             println!();
             self.state.index = 0;
@@ -287,6 +313,8 @@ impl Cpu {
                 LOAD_REGISTER => self.decode_ldr(addressing),
                 /* Arithmetic instructions */
                 ADD_WITHOUT_CARRY => self.decode_add(addressing),
+                SIGNED_MULTIPLY => self.decode_imul(addressing),
+                UNSIGNED_MULTIPLY => self.decode_mul(addressing),
                 /* Status flag instructions  */
                 SET_AUTO_INCREMENT_FLAG => self.decode_sai(),
                 CLEAR_AUTO_INCREMENT_FLAG => self.decode_cla(),
@@ -353,6 +381,76 @@ impl Cpu {
         }
     }
 
+    fn decode_imul(&mut self, addressing: u8) {
+        match addressing & 0x01 {
+            REGISTER_REGISTER_ADDRESSING => {
+                self.state.micro_ops.push(MicroOp::FetchDestSrc);
+                self.state.micro_ops.push(MicroOp::BeginMultiply);
+                self.state.micro_ops.push(
+                    MicroOp::SignedMultiplyInvertNegativeMultiplicand);
+                self.state.micro_ops.push(
+                    MicroOp::SignedMultiplyInvertNegativeMultiplier);
+
+                for _ in 0..7 {
+                    self.state.micro_ops.push(
+                        MicroOp::MultiplyAdd);
+                    /*
+                        Addition should take 2 cycles, as the cpu
+                        has 8-bit alu and the target register is 16 bit.
+                        I'm too lazy to actually implement this in microcode,
+                        so the first op does whole addition and the second
+                        one just executes nop for cycle timing.
+                    */
+                    self.state.micro_ops.push(MicroOp::Nop);
+                    self.state.micro_ops.push(
+                        MicroOp::MultiplyShiftMultiplier);
+                    self.state.micro_ops.push(
+                        MicroOp::MultiplyShiftMultiplicand);
+                }
+                self.state.micro_ops.push(MicroOp::MultiplyAdd);
+                // as above
+                self.state.micro_ops.push(MicroOp::Nop);
+                self.state.micro_ops.push(
+                    MicroOp::SignedMultiplyInvertResultIfFlag);
+
+                self.state.micro_ops.push(MicroOp::EndSignedMultiply);
+            },
+            REGISTER_IMMEDIATE_ADDRESSING => {
+                unimplemented!();
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn decode_mul(&mut self, addressing: u8) {
+        match addressing & 0x01 {
+            REGISTER_REGISTER_ADDRESSING => {
+                self.state.micro_ops.push(MicroOp::FetchDestSrc);
+                self.state.micro_ops.push(MicroOp::BeginMultiply);
+
+                for _ in 0..7 {
+                    self.state.micro_ops.push(
+                        MicroOp::MultiplyAdd);
+                    // as with imul
+                    self.state.micro_ops.push(MicroOp::Nop);
+                    self.state.micro_ops.push(
+                        MicroOp::MultiplyShiftMultiplier);
+                    self.state.micro_ops.push(
+                        MicroOp::MultiplyShiftMultiplicand);
+                }
+                self.state.micro_ops.push(MicroOp::MultiplyAdd);
+                // as with imul
+                self.state.micro_ops.push(MicroOp::Nop);
+                self.state.micro_ops.push(MicroOp::EndUnsignedMultiply);
+
+            },
+            REGISTER_IMMEDIATE_ADDRESSING => {
+                unimplemented!();
+            }
+            _ => unreachable!(),
+        }
+    }
+
     fn decode_sai(&mut self) {
         self.state.micro_ops.push(MicroOp::SetAutoIncrementFlag);
     }
@@ -361,12 +459,13 @@ impl Cpu {
         self.state.micro_ops.push(MicroOp::ClearAutoIncrementFlag);
     }
 
-
-
     fn execute_micro_op(&mut self) {
 
         let current_op = self.state.micro_ops[self.state.index];
         match current_op {
+            MicroOp::Nop => {
+                // do nothing
+            },
             MicroOp::SetAutoIncrementFlag => {
                 self.registers.set_auto_increment_flag();
             },
@@ -442,8 +541,8 @@ impl Cpu {
                 let src2val = self.load_register(src2);
                 let result = src1val as u16 + src2val as u16;
 
-                self.registers.set_carry_flag(result);
-                self.registers.set_overflow_flag(src1val, src2val, result);
+                self.registers.set_carry_flag_on_value(result);
+                self.registers.set_overflow_flag_on_value(src1val, src2val, result);
 
                 self.store_register(destination, result as u8);
             },
@@ -455,14 +554,110 @@ impl Cpu {
                 let src2val = self.state.value_register;
                 let result = src1val as u16 + src2val as u16;
 
-                self.registers.set_carry_flag(result);
-                self.registers.set_overflow_flag(src1val, src2val, result);
+
+                self.registers.set_carry_flag_on_value(result);
+                self.registers.set_overflow_flag_on_value(src1val, src2val, result);
 
                 self.store_register(destination, result as u8);
             },
+            MicroOp::BeginMultiply => {
+                let src1 = (self.state.dest_src_register >> 4) & 0x03;
+                let src2 = (self.state.dest_src_register >> 6) & 0x03;
+
+                let src1val = self.load_register(src1);
+                let src2val = self.load_register(src2);
+
+                // indirect & direct address registers are reused for
+                // multiplication
+                self.state.indirect_address_register = 0;
+                self.state.address_register = src2val as u16;
+                self.state.value_register = src1val;
+                self.state.multiply_negate = false;
+            },
+            MicroOp::SignedMultiplyInvertNegativeMultiplicand => {
+                if self.state.address_register > 127 {
+                    self.state.address_register =
+                        (self.state.address_register as u8)
+                            .wrapping_neg() as u16;
+                    self.state.multiply_negate = !self.state.multiply_negate;
+                }
+            },
+            MicroOp::SignedMultiplyInvertNegativeMultiplier => {
+                if self.state.value_register > 127 {
+                    self.state.value_register =
+                        self.state.value_register.wrapping_neg();
+                    self.state.multiply_negate = !self.state.multiply_negate;
+                }
+
+            },
+            MicroOp::MultiplyAdd => {
+                if self.state.value_register & 0x01 != 0 {
+                    self.state.indirect_address_register =
+                        (self.state.indirect_address_register as u32 +
+                        self.state.address_register as u32) as u16;
+                }
+            },
+            MicroOp::MultiplyShiftMultiplier => {
+                self.state.value_register >>= 1;
+            },
+            MicroOp::MultiplyShiftMultiplicand => {
+                self.state.address_register <<= 1;
+            },
+            MicroOp::SignedMultiplyInvertResultIfFlag => {
+                if self.state.multiply_negate {
+                    self.state.indirect_address_register =
+                        self.state.indirect_address_register.wrapping_neg();
+                }
+            },
+            MicroOp::EndSignedMultiply => {
+                let (_, high, low) = self.end_mul_common();
+                let sign_bit = 0x80 & low;
+
+                if (sign_bit != 0 && high == 0xFF)
+                    || (sign_bit == 0 && high == 0) {
+                    self.registers.clear_overflow_flag();
+                    self.registers.clear_carry_flag();
+                } else {
+                    self.registers.set_overflow_flag();
+                    self.registers.set_carry_flag();
+                }
+
+            }
+            MicroOp::EndUnsignedMultiply => {
+                let (res, high, _) = self.end_mul_common();
+                if high == 0 {
+                    self.registers.clear_overflow_flag();
+                    self.registers.clear_carry_flag();
+                } else {
+                    self.registers.set_overflow_flag();
+                    self.registers.set_carry_flag();
+                }
+            }
         }
 
         self.state.index += 1;
+    }
+
+    fn end_mul_common(&mut self) -> (u16, u8, u8) {
+        let high_byte_reg = self.state.dest_src_register & 0x03;
+        let low_byte_reg = (self.state.dest_src_register >> 2) & 0x03;
+        let result = self.state.indirect_address_register;
+
+        self.store_register(
+            low_byte_reg,
+            result as u8);
+
+        self.store_register(
+            high_byte_reg,
+            (result >> 8) as u8);
+
+        if result == 0 {
+            self.registers.set_zero_flag();
+        } else {
+            self.registers.clear_zero_flag();
+        }
+
+        (result, (result >> 8) as u8, result as u8)
     }
 
     fn store_register(&mut self, register: u8, value: u8) {
@@ -572,6 +767,34 @@ mod tests {
             (destination & 0x03) |
             ((src_1 & 0x03) << 2));
         opcodes.push(immediate);
+    }
+
+    fn emit_unsigned_multiply_reg_reg(
+        opcodes: &mut Vec<u8>,
+        high_reg: u8,
+        low_reg: u8,
+        src_1: u8,
+        src_2: u8) {
+        opcodes.push((UNSIGNED_MULTIPLY << 2) | REGISTER_REGISTER_ADDRESSING);
+        opcodes.push(
+            (high_reg & 0x03) |
+            ((low_reg & 0x03) << 2) |
+            ((src_1 & 0x03) <<  4) |
+            ((src_2 & 0x03) << 6));
+    }
+
+    fn emit_signed_multiply_reg_reg(
+        opcodes: &mut Vec<u8>,
+        high_reg: u8,
+        low_reg: u8,
+        src_1: u8,
+        src_2: u8) {
+        opcodes.push((SIGNED_MULTIPLY << 2) | REGISTER_REGISTER_ADDRESSING);
+        opcodes.push(
+            (high_reg & 0x03) |
+            ((low_reg & 0x03) << 2) |
+            ((src_1 & 0x03) <<  4) |
+            ((src_2 & 0x03) << 6));
     }
 
 
@@ -1376,4 +1599,447 @@ mod tests {
         assert!(cpu.registers.overflow_flag());
     }
 
+    #[test]
+    fn unsigned_multiply_stores_values_correctly_in_registers() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+        // clear flag
+        emit_unsigned_multiply_reg_reg(
+            &mut program,
+            ENCODING_R1,
+            ENCODING_R2,
+            ENCODING_R3,
+            ENCODING_R4);
+        emit_unsigned_multiply_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+        emit_unsigned_multiply_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+        emit_unsigned_multiply_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 5;
+        cpu.registers.r2 = 5;
+        cpu.registers.r3 = 8;
+        cpu.registers.r4 = 9;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(72, cpu.registers.r2);
+        assert_eq!(0, cpu.registers.r1);
+
+
+        cpu.registers.r1 = 98;
+        cpu.registers.r2 = 65;
+        cpu.registers.r3 = 8;
+        cpu.registers.r4 = 9;
+
+        execute_instruction(&mut cpu);
+        // 98*65 = 6370 = 24*256 + 226
+        assert_eq!(226, cpu.registers.r3);
+        assert_eq!(24, cpu.registers.r4);
+
+
+        cpu.registers.r1 = 129;
+        cpu.registers.r2 = 129;
+        cpu.registers.r3 = 8;
+        cpu.registers.r4 = 9;
+        execute_instruction(&mut cpu);
+        // 129*129 = 16641 = 65*256 + 1
+        assert_eq!(1, cpu.registers.r3);
+        assert_eq!(65, cpu.registers.r4);
+
+        cpu.registers.r1 = 200;
+        cpu.registers.r2 = 75;
+        cpu.registers.r3 = 9;
+        cpu.registers.r4 = 8;
+        execute_instruction(&mut cpu);
+        // 200*75 = 35230 = 58*256 + 152
+        assert_eq!(152, cpu.registers.r3);
+        assert_eq!(58, cpu.registers.r4);
+    }
+
+    #[test]
+    fn unsigned_multiply_sets_zero_flag_if_result_is_zero() {
+         let mut cpu = create_test_cpu();
+        let mut program = vec![];
+        emit_unsigned_multiply_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = 0;
+        cpu.registers.r1 = 0;
+        cpu.registers.r2 = 20;
+        cpu.registers.r3 = 9;
+        cpu.registers.r4 = 8;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0, cpu.registers.r3);
+        assert_eq!(0, cpu.registers.r4);
+        assert!(cpu.registers.zero_flag());
+    }
+
+    #[test]
+    fn unsigned_multiply_unsets_zero_flag_if_result_is_not_zero() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+        emit_unsigned_multiply_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = ZERO_FLAG;
+        cpu.registers.r1 = 3;
+        cpu.registers.r2 = 20;
+        cpu.registers.r3 = 9;
+        cpu.registers.r4 = 8;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(60, cpu.registers.r3);
+        assert_eq!(0, cpu.registers.r4);
+        assert!(!cpu.registers.zero_flag());
+    }
+
+    #[test]
+    fn unsigned_multiply_set_carry_and_overflow_flags_if_high_byte_is_nonzero() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_unsigned_multiply_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = 0;
+        cpu.registers.r1 = 40;
+        cpu.registers.r2 = 20;
+        cpu.registers.r3 = 9;
+        cpu.registers.r4 = 8;
+
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.overflow_flag());
+        assert!(cpu.registers.carry_flag());
+    }
+
+
+    #[test]
+    fn unsigned_multiply_unsets_carry_and_overflow_flags_if_high_byte_is_zero() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_unsigned_multiply_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = CARRY_FLAG | OVERFLOW_FLAG;
+        cpu.registers.r1 = 2;
+        cpu.registers.r2 = 20;
+        cpu.registers.r3 = 9;
+        cpu.registers.r4 = 8;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.overflow_flag());
+        assert!(!cpu.registers.carry_flag());
+    }
+
+    #[test]
+    fn signed_multiply_stores_values_correctly_in_registers() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+        // clear flag
+        emit_signed_multiply_reg_reg(
+            &mut program,
+            ENCODING_R1,
+            ENCODING_R2,
+            ENCODING_R3,
+            ENCODING_R4);
+        emit_signed_multiply_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+        emit_signed_multiply_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+        emit_signed_multiply_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+        emit_signed_multiply_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        // should work with small positive numbers
+        cpu.registers.r1 = 6;
+        cpu.registers.r2 = 5;
+        cpu.registers.r3 = 8;
+        cpu.registers.r4 = 9;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(72, cpu.registers.r2);
+        assert_eq!(0, cpu.registers.r1);
+
+        // works with small negative numbers
+        cpu.registers.r1 = 8u8.wrapping_neg(); // -8
+        cpu.registers.r2 = 9;
+        cpu.registers.r3 = 5;
+        cpu.registers.r4 = 6;
+
+        execute_instruction(&mut cpu);
+        // -8*9 = -72
+        assert_eq!(72u8.wrapping_neg(), cpu.registers.r3);
+        assert_eq!(0xFF, cpu.registers.r4);
+
+
+        // same as above, but negative number switched
+        cpu.registers.r1 = 8;
+        cpu.registers.r2 = 9u8.wrapping_neg(); // -9
+        cpu.registers.r3 = 5;
+        cpu.registers.r4 = 6;
+
+        execute_instruction(&mut cpu);
+        // 8*-9 = -72
+        assert_eq!(72u8.wrapping_neg(), cpu.registers.r3);
+        assert_eq!(0xFF, cpu.registers.r4);
+
+        // works when both numbers negative
+        cpu.registers.r1 = 8u8.wrapping_neg(); // -8
+        cpu.registers.r2 = 9u8.wrapping_neg(); // -9
+        cpu.registers.r3 = 5;
+        cpu.registers.r4 = 6;
+
+        execute_instruction(&mut cpu);
+        // -8*-9 = 72
+        assert_eq!(72, cpu.registers.r3);
+        assert_eq!(0x00, cpu.registers.r4);
+
+        // works with larger numbers
+        cpu.registers.r1 = 126;
+        cpu.registers.r2 = 92u8.wrapping_neg(); // -92
+        cpu.registers.r3 = 5;
+        cpu.registers.r4 = 6;
+
+        execute_instruction(&mut cpu);
+        // 126*-92 = -11592 = 0xD2B8
+        assert_eq!(0xB8, cpu.registers.r3);
+        assert_eq!(0xD2, cpu.registers.r4);
+    }
+
+
+    #[test]
+    fn signed_multiply_sets_zero_flag_if_result_is_zero() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+        emit_signed_multiply_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = 0;
+        cpu.registers.r1 = 0;
+        cpu.registers.r2 = 20;
+        cpu.registers.r3 = 9;
+        cpu.registers.r4 = 8;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0, cpu.registers.r3);
+        assert_eq!(0, cpu.registers.r4);
+        assert!(cpu.registers.zero_flag());
+    }
+
+    #[test]
+    fn signed_multiply_unsets_zero_flag_if_result_is_not_zero() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+        emit_signed_multiply_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = ZERO_FLAG;
+        cpu.registers.r1 = 3;
+        cpu.registers.r2 = 20;
+        cpu.registers.r3 = 9;
+        cpu.registers.r4 = 8;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(60, cpu.registers.r3);
+        assert_eq!(0, cpu.registers.r4);
+        assert!(!cpu.registers.zero_flag());
+    }
+
+    #[test]
+    fn signed_multiply_sets_negative_flag_if_result_is_negative() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+        emit_signed_multiply_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = 0;
+        cpu.registers.r1 = 3u8.wrapping_neg();
+        cpu.registers.r2 = 20;
+        cpu.registers.r3 = 9;
+        cpu.registers.r4 = 8;
+
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.negative_flag());
+    }
+
+    #[test]
+    fn signed_multiply_unsets_negative_flag_if_result_is_not_negative() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+        emit_signed_multiply_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = NEGATIVE_FLAG;
+        cpu.registers.r1 = 3;
+        cpu.registers.r2 = 20;
+        cpu.registers.r3 = 9;
+        cpu.registers.r4 = 8;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.negative_flag());
+    }
+
+    #[test]
+    fn signed_multiply_sets_carry_and_overflow_flags_if_result_does_not_fit_low_byte() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+        emit_signed_multiply_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+        emit_signed_multiply_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = 0;
+        cpu.registers.r1 = 30;
+        cpu.registers.r2 = 20;
+        cpu.registers.r3 = 9;
+        cpu.registers.r4 = 8;
+
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.carry_flag());
+        assert!(cpu.registers.overflow_flag());
+
+        cpu.registers.flags = 0;
+        cpu.registers.r1 = 30u8.wrapping_neg();
+        cpu.registers.r2 = 20;
+        cpu.registers.r3 = 9;
+        cpu.registers.r4 = 8;
+
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.carry_flag());
+        assert!(cpu.registers.overflow_flag());
+    }
+
+    #[test]
+    fn signed_multiply_unsets_carry_and_overflow_flags_if_result_fits_low_byte() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+        emit_signed_multiply_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+        emit_signed_multiply_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = OVERFLOW_FLAG | CARRY_FLAG;
+        cpu.registers.r1 = 3;
+        cpu.registers.r2 = 20;
+        cpu.registers.r3 = 9;
+        cpu.registers.r4 = 8;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.carry_flag());
+        assert!(!cpu.registers.overflow_flag());
+
+        cpu.registers.flags = OVERFLOW_FLAG | CARRY_FLAG;
+        cpu.registers.r1 = 3u8.wrapping_neg();
+        cpu.registers.r2 = 20;
+        cpu.registers.r3 = 9;
+        cpu.registers.r4 = 8;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.carry_flag());
+        assert!(!cpu.registers.overflow_flag());
+    }
 }
