@@ -58,6 +58,10 @@ const CLEAR_AUTO_INCREMENT_FLAG: u8 = 0x06;
 const SP_INITIAL_VALUE: u16 = 0x200;
 
 
+/* Interrupt vector table address locations */
+const RESET_VECTOR: u16 = 0x00;
+const ILLEGAL_OPCODE_VECTOR: u16 = 0x02;
+
 /*
     Micro ops that actually define what the CPU is doing currently.
     Using micro ops means certain instructions naturally take certain
@@ -69,16 +73,24 @@ enum MicroOp {
     Nop,
     SetAutoIncrementFlag,
     ClearAutoIncrementFlag,
+    ClearInterruptFlag,
+    SetFaultFlag,
     FetchValue,
     FetchDestSrc,
     FetchLowAddress,
     FetchHighAddress,
     FetchIndirectLowAddress,
     FetchIndirectHighAddress,
+    FetchInterruptVectorLowByte,
+    FetchInterruptVectorHighByte,
     IncrementAndStoreIndirectLowByte,
     StoreIndirectHighByte,
+    PushPCHighByte,
+    PushPCLowByte,
+    PushStatusFlags,
     ImmedateToRegister,
     AbsoluteToRegister,
+    RegisterToAbsolute,
     IndexedAddress,
     AddWithoutCarryRegister,
     AddWithoutCarryImmediate,
@@ -235,12 +247,28 @@ impl Registers {
         self.flags &= !OVERFLOW_FLAG;
     }
 
+    fn set_interrupt_flag(&mut self) {
+        self.flags |= INTERRUPT_ENABLE_FLAG;
+    }
+
+    fn clear_interrupt_flag(&mut self) {
+        self.flags &= !INTERRUPT_ENABLE_FLAG;
+    }
+
     fn set_auto_increment_flag(&mut self) {
         self.flags |= AUTO_INCREMENT_FLAG;
     }
 
     fn clear_autoincrement_flag(&mut self) {
         self.flags &= !AUTO_INCREMENT_FLAG;
+    }
+
+    fn set_fault_flag(&mut self) {
+        self.flags |= FAULT_FLAG;
+    }
+
+    fn clear_fault_flag(&mut self) {
+        self.flags &= !FAULT_FLAG;
     }
 
 }
@@ -299,6 +327,18 @@ impl Cpu {
         value
     }
 
+
+    fn write(&mut self, address: u16, value: u8) {
+        println!("Write into 0x{:x} with value 0x{:x}", address, value);
+        self.memory_controller.borrow_mut().write(address, value);
+    }
+
+    fn push(&mut self, value: u8) {
+        let sp = self.registers.sp;
+        self.write(sp, value);
+        self.registers.sp -= 1;
+    }
+
     pub fn execute(&mut self) {
         if self.state.index == self.state.micro_ops.len() {
             println!();
@@ -311,6 +351,7 @@ impl Cpu {
             match opcode {
                 /* Data movement instructions */
                 LOAD_REGISTER => self.decode_ldr(addressing),
+                STORE_REGISTER => self.decode_str(addressing),
                 /* Arithmetic instructions */
                 ADD_WITHOUT_CARRY => self.decode_add(addressing),
                 SIGNED_MULTIPLY => self.decode_imul(addressing),
@@ -366,6 +407,44 @@ impl Cpu {
         }
     }
 
+    fn decode_str(&mut self, addressing: u8) {
+        match addressing & 0x03 {
+            IMMEDIATE_ADDRESSING => {
+                self.illegal_opcode();
+            },
+            ABSOLUTE_ADDRESSING => {
+                self.state.micro_ops.push(MicroOp::FetchDestSrc);
+                self.state.micro_ops.push(MicroOp::FetchLowAddress);
+                self.state.micro_ops.push(MicroOp::FetchHighAddress);
+                self.state.micro_ops.push(MicroOp::RegisterToAbsolute);
+            },
+            INDEXED_ABSOLUTE_ADDRESSING => {
+                self.state.micro_ops.push(MicroOp::FetchDestSrc);
+                self.state.micro_ops.push(MicroOp::FetchLowAddress);
+                self.state.micro_ops.push(MicroOp::FetchHighAddress);
+                self.state.micro_ops.push(MicroOp::IndexedAddress);
+                self.state.micro_ops.push(MicroOp::RegisterToAbsolute);
+            },
+            INDIRECT_ADDRESSING => {
+                self.state.micro_ops.push(MicroOp::FetchDestSrc);
+                self.state.micro_ops.push(MicroOp::FetchLowAddress);
+                self.state.micro_ops.push(MicroOp::FetchHighAddress);
+                self.state.micro_ops.push(MicroOp::FetchIndirectLowAddress);
+                self.state.micro_ops.push(MicroOp::FetchIndirectHighAddress);
+                self.state.micro_ops.push(MicroOp::RegisterToAbsolute);
+
+                if self.registers.auto_increment_flag() {
+                    self.state.micro_ops.push(
+                        MicroOp::IncrementAndStoreIndirectLowByte);
+                    self.state.micro_ops.push(
+                        MicroOp::StoreIndirectHighByte);
+                }
+            },
+            _ => unreachable!(),
+        }
+    }
+
+
     fn decode_add(&mut self, addressing: u8) {
         match addressing & 0x01 {
             REGISTER_REGISTER_ADDRESSING => {
@@ -412,11 +491,40 @@ impl Cpu {
                 self.state.micro_ops.push(MicroOp::Nop);
                 self.state.micro_ops.push(
                     MicroOp::SignedMultiplyInvertResultIfFlag);
-
                 self.state.micro_ops.push(MicroOp::EndSignedMultiply);
             },
             REGISTER_IMMEDIATE_ADDRESSING => {
-                unimplemented!();
+                self.state.micro_ops.push(MicroOp::FetchDestSrc);
+                self.state.micro_ops.push(MicroOp::BeginMultiply);
+                self.state.micro_ops.push(MicroOp::FetchValue);
+                self.state.micro_ops.push(
+                    MicroOp::SignedMultiplyInvertNegativeMultiplicand);
+                self.state.micro_ops.push(
+                    MicroOp::SignedMultiplyInvertNegativeMultiplier);
+
+                for _ in 0..7 {
+                    self.state.micro_ops.push(
+                        MicroOp::MultiplyAdd);
+                    /*
+                        Addition should take 2 cycles, as the cpu
+                        has 8-bit alu and the target register is 16 bit.
+                        I'm too lazy to actually implement this in microcode,
+                        so the first op does whole addition and the second
+                        one just executes nop for cycle timing.
+                    */
+                    self.state.micro_ops.push(MicroOp::Nop);
+                    self.state.micro_ops.push(
+                        MicroOp::MultiplyShiftMultiplier);
+                    self.state.micro_ops.push(
+                        MicroOp::MultiplyShiftMultiplicand);
+                }
+                self.state.micro_ops.push(MicroOp::MultiplyAdd);
+                // as above
+                self.state.micro_ops.push(MicroOp::Nop);
+                self.state.micro_ops.push(
+                    MicroOp::SignedMultiplyInvertResultIfFlag);
+                self.state.micro_ops.push(MicroOp::EndSignedMultiply);
+
             }
             _ => unreachable!(),
         }
@@ -445,7 +553,26 @@ impl Cpu {
 
             },
             REGISTER_IMMEDIATE_ADDRESSING => {
-                unimplemented!();
+                self.state.micro_ops.push(MicroOp::FetchDestSrc);
+                self.state.micro_ops.push(MicroOp::BeginMultiply);
+                self.state.micro_ops.push(MicroOp::FetchValue);
+
+                for _ in 0..7 {
+                    self.state.micro_ops.push(
+                        MicroOp::MultiplyAdd);
+                    // as with imul
+                    self.state.micro_ops.push(MicroOp::Nop);
+                    self.state.micro_ops.push(
+                        MicroOp::MultiplyShiftMultiplier);
+                    self.state.micro_ops.push(
+                        MicroOp::MultiplyShiftMultiplicand);
+                }
+
+                self.state.micro_ops.push(MicroOp::MultiplyAdd);
+                // as with imul
+                self.state.micro_ops.push(MicroOp::Nop);
+                self.state.micro_ops.push(MicroOp::EndUnsignedMultiply);
+
             }
             _ => unreachable!(),
         }
@@ -472,6 +599,12 @@ impl Cpu {
             MicroOp::ClearAutoIncrementFlag => {
                 self.registers.clear_autoincrement_flag();
             },
+            MicroOp::ClearInterruptFlag => {
+                self.registers.clear_interrupt_flag();
+            },
+            MicroOp::SetFaultFlag => {
+                self.registers.set_fault_flag();
+            },
             MicroOp::FetchValue => {
                 self.state.value_register = self.read_pc();
             }
@@ -497,6 +630,23 @@ impl Cpu {
                     (self.read(self.state.indirect_address_register) as u16)
                     << 8;
             },
+            MicroOp::FetchInterruptVectorLowByte => {
+                println!("Reading from 0x:{:x}", self.state.value_register);
+
+                self.registers.pc =
+                    self.read(self.state.address_register) as u16;
+
+                println!("Reg: 0x{:x}", self.registers.pc);
+                self.state.address_register += 1;
+            },
+            MicroOp::FetchInterruptVectorHighByte => {
+                println!("Reading from 0x:{:x}", self.state.value_register);
+                self.registers.pc |=
+                    (self.read(self.state.address_register) as u16)
+                    << 8;
+
+                println!("Reg: 0x{:x}", self.registers.pc);
+            },
             MicroOp::IncrementAndStoreIndirectLowByte => {
                 self.state.address_register =
                     (self.state.address_register as u32 + 1) as u16;
@@ -511,6 +661,18 @@ impl Cpu {
                     self.state.indirect_address_register + 1 ,
                     (self.state.address_register >> 8) as u8);
             },
+            MicroOp::PushPCHighByte => {
+                let byte = (self.registers.pc >> 8) as u8;
+                self.push(byte);
+            },
+            MicroOp::PushPCLowByte => {
+                let byte = self.registers.pc as u8;
+                self.push(byte);
+            },
+            MicroOp::PushStatusFlags => {
+                let flags = self.registers.flags;
+                self.push(flags);
+            },
             MicroOp::ImmedateToRegister => {
                 let immediate = self.read_pc();
                 let destination = self.state.dest_src_register & 0x03;
@@ -521,6 +683,12 @@ impl Cpu {
                 let destination = self.state.dest_src_register & 0x03;
                 self.store_register(destination, value);
             },
+            MicroOp::RegisterToAbsolute => {
+                let src = self.state.dest_src_register & 0x03;
+                let value = self.load_register(src);
+                let address = self.state.address_register;
+                self.write(address, value);
+            }
             MicroOp::IndexedAddress => {
                 let index_reg = (self.state.dest_src_register >> 2) & 0x03;
                 let value = self.load_register(index_reg);
@@ -556,13 +724,14 @@ impl Cpu {
 
 
                 self.registers.set_carry_flag_on_value(result);
-                self.registers.set_overflow_flag_on_value(src1val, src2val, result);
+                self.registers.set_overflow_flag_on_value(
+                    src1val, src2val, result);
 
                 self.store_register(destination, result as u8);
             },
             MicroOp::BeginMultiply => {
-                let src1 = (self.state.dest_src_register >> 4) & 0x03;
-                let src2 = (self.state.dest_src_register >> 6) & 0x03;
+                let src1 = (self.state.dest_src_register >> 6) & 0x03;
+                let src2 = (self.state.dest_src_register >> 4) & 0x03;
 
                 let src1val = self.load_register(src1);
                 let src2val = self.load_register(src2);
@@ -671,7 +840,6 @@ impl Cpu {
         self.registers.set_zero_negative_flags(value);
     }
 
-
     fn load_register(&mut self, register: u8) -> u8 {
         match register & 0x03 {
             ENCODING_R1 => self.registers.r1,
@@ -680,6 +848,23 @@ impl Cpu {
             ENCODING_R4 => self.registers.r4,
             _ => unreachable!(),
         }
+    }
+
+
+    fn illegal_opcode(&mut self) {
+        self.start_interrupt();
+        self.state.address_register = ILLEGAL_OPCODE_VECTOR;
+        self.state.micro_ops.push(MicroOp::SetFaultFlag);
+    }
+
+    fn start_interrupt(&mut self) {
+        self.state.micro_ops.clear();
+        self.state.micro_ops.push(MicroOp::PushPCHighByte);
+        self.state.micro_ops.push(MicroOp::PushPCLowByte);
+        self.state.micro_ops.push(MicroOp::PushStatusFlags);
+        self.state.micro_ops.push(MicroOp::ClearInterruptFlag);
+        self.state.micro_ops.push(MicroOp::FetchInterruptVectorLowByte);
+        self.state.micro_ops.push(MicroOp::FetchInterruptVectorHighByte);
     }
 }
 
@@ -745,6 +930,45 @@ mod tests {
         opcodes.push((address >> 8)  as u8);
     }
 
+
+    // Invalid opcode, exists for testing.
+    fn emit_store_immediate(
+        opcodes: &mut Vec<u8>) {
+        opcodes.push((STORE_REGISTER << 2) | IMMEDIATE_ADDRESSING);
+    }
+
+    fn emit_store_absolute(
+        opcodes: &mut Vec<u8>,
+        source: u8,
+        address: u16) {
+        opcodes.push((STORE_REGISTER << 2) | ABSOLUTE_ADDRESSING);
+        opcodes.push(source & 0x03);
+        opcodes.push(address as u8);
+        opcodes.push((address >> 8)  as u8);
+    }
+
+    fn emit_store_indexed_absolute(
+        opcodes: &mut Vec<u8>,
+        source: u8,
+        address: u16,
+        index: u8) {
+        opcodes.push((STORE_REGISTER << 2) | INDEXED_ABSOLUTE_ADDRESSING);
+        opcodes.push(source & 0x03 | ((index & 0x03) << 2));
+        opcodes.push(address as u8);
+        opcodes.push((address >> 8)  as u8);
+    }
+
+    fn emit_store_indirect(
+        opcodes: &mut Vec<u8>,
+        source: u8,
+        address: u16) {
+        opcodes.push((STORE_REGISTER << 2) | INDIRECT_ADDRESSING);
+        opcodes.push(source & 0x03);
+        opcodes.push(address as u8);
+        opcodes.push((address >> 8)  as u8);
+    }
+
+
     fn emit_add_without_carry_reg_reg(
         opcodes: &mut Vec<u8>,
         destination: u8,
@@ -783,6 +1007,21 @@ mod tests {
             ((src_2 & 0x03) << 6));
     }
 
+    fn emit_unsigned_multiply_reg_immediate(
+        opcodes: &mut Vec<u8>,
+        high_reg: u8,
+        low_reg: u8,
+        src_1: u8,
+        immediate: u8) {
+
+        opcodes.push((UNSIGNED_MULTIPLY << 2) | REGISTER_IMMEDIATE_ADDRESSING);
+        opcodes.push(
+            (high_reg & 0x03) |
+            ((low_reg & 0x03) << 2) |
+            ((src_1 & 0x03) <<  4));
+        opcodes.push(immediate);
+    }
+
     fn emit_signed_multiply_reg_reg(
         opcodes: &mut Vec<u8>,
         high_reg: u8,
@@ -795,6 +1034,21 @@ mod tests {
             ((low_reg & 0x03) << 2) |
             ((src_1 & 0x03) <<  4) |
             ((src_2 & 0x03) << 6));
+    }
+
+    fn emit_signed_multiply_reg_immediate(
+        opcodes: &mut Vec<u8>,
+        high_reg: u8,
+        low_reg: u8,
+        src_1: u8,
+        immediate: u8) {
+
+        opcodes.push((SIGNED_MULTIPLY << 2) | REGISTER_IMMEDIATE_ADDRESSING);
+        opcodes.push(
+            (high_reg & 0x03) |
+            ((low_reg & 0x03) << 2) |
+            ((src_1 & 0x03) <<  4));
+        opcodes.push(immediate);
     }
 
 
@@ -907,7 +1161,7 @@ mod tests {
         emit_load_absolute(&mut program, ENCODING_R2, 0x1234);
         update_program(&mut cpu, program, 0x2000);
 
-        cpu.memory_controller.borrow_mut().write(0x1234, 0xFF);
+        cpu.write(0x1234, 0xFF);
         execute_instruction(&mut cpu);
         assert_eq!(0xFF, cpu.registers.r2);
     }
@@ -920,7 +1174,7 @@ mod tests {
         emit_load_absolute(&mut program, ENCODING_R2, 0x1234);
         update_program(&mut cpu, program, 0x2000);
 
-        cpu.memory_controller.borrow_mut().write(0x1234, 0);
+        cpu.write(0x1234, 0);
         cpu.registers.flags = 0;
 
         execute_instruction(&mut cpu);
@@ -935,7 +1189,7 @@ mod tests {
         emit_load_absolute(&mut program, ENCODING_R2, 0x1234);
         update_program(&mut cpu, program, 0x2000);
 
-        cpu.memory_controller.borrow_mut().write(0x1234, 0x23);
+        cpu.write(0x1234, 0x23);
         cpu.registers.flags = ZERO_FLAG;
 
         execute_instruction(&mut cpu);
@@ -950,7 +1204,7 @@ mod tests {
         emit_load_absolute(&mut program, ENCODING_R2, 0x1234);
         update_program(&mut cpu, program, 0x2000);
 
-        cpu.memory_controller.borrow_mut().write(0x1234, 0x86);
+        cpu.write(0x1234, 0x86);
         cpu.registers.flags = 0;
 
         execute_instruction(&mut cpu);
@@ -965,7 +1219,7 @@ mod tests {
         emit_load_absolute(&mut program, ENCODING_R2, 0x1234);
         update_program(&mut cpu, program, 0x2000);
 
-        cpu.memory_controller.borrow_mut().write(0x1234, 0x70);
+        cpu.write(0x1234, 0x70);
         cpu.registers.flags = NEGATIVE_FLAG;
 
         execute_instruction(&mut cpu);
@@ -983,7 +1237,7 @@ mod tests {
         update_program(&mut cpu, program, 0x2000);
 
         cpu.registers.r4 = 0x04;
-        cpu.memory_controller.borrow_mut().write(0x1238, 0xFA);
+        cpu.write(0x1238, 0xFA);
         execute_instruction(&mut cpu);
         assert_eq!(0xFA, cpu.registers.r3);
     }
@@ -998,7 +1252,7 @@ mod tests {
         update_program(&mut cpu, program, 0x2000);
         cpu.registers.r4 = 0x04;
 
-        cpu.memory_controller.borrow_mut().write(0x1238, 0);
+        cpu.write(0x1238, 0);
         cpu.registers.flags = 0;
 
         execute_instruction(&mut cpu);
@@ -1015,7 +1269,7 @@ mod tests {
         update_program(&mut cpu, program, 0x2000);
         cpu.registers.r4 = 0x04;
 
-        cpu.memory_controller.borrow_mut().write(0x1238, 23);
+        cpu.write(0x1238, 23);
         cpu.registers.flags = ZERO_FLAG;
 
         execute_instruction(&mut cpu);
@@ -1032,7 +1286,7 @@ mod tests {
         update_program(&mut cpu, program, 0x2000);
         cpu.registers.r4 = 0x04;
 
-        cpu.memory_controller.borrow_mut().write(0x1238, 0x80);
+        cpu.write(0x1238, 0x80);
         cpu.registers.flags = 0;
 
         execute_instruction(&mut cpu);
@@ -1049,7 +1303,7 @@ mod tests {
         update_program(&mut cpu, program, 0x2000);
         cpu.registers.r4 = 0x04;
 
-        cpu.memory_controller.borrow_mut().write(0x1238, 0x7F);
+        cpu.write(0x1238, 0x7F);
         cpu.registers.flags = NEGATIVE_FLAG;
 
         execute_instruction(&mut cpu);
@@ -1113,10 +1367,10 @@ mod tests {
             &mut program, ENCODING_R4, 0x1234);
         update_program(&mut cpu, program, 0x2000);
 
-        cpu.memory_controller.borrow_mut().write(0x1234, 0xD9);
-        cpu.memory_controller.borrow_mut().write(0x1235, 0x38);
+        cpu.write(0x1234, 0xD9);
+        cpu.write(0x1235, 0x38);
 
-        cpu.memory_controller.borrow_mut().write(0x38D9, 0xA8);
+        cpu.write(0x38D9, 0xA8);
         execute_instruction(&mut cpu);
 
         assert_eq!(0xA8, cpu.registers.r4);
@@ -1131,14 +1385,14 @@ mod tests {
             &mut program, ENCODING_R4, 0x1234);
         update_program(&mut cpu, program, 0x2000);
 
-        cpu.memory_controller.borrow_mut().write(0x1234, 0xD9);
-        cpu.memory_controller.borrow_mut().write(0x1235, 0x38);
+        cpu.write(0x1234, 0xD9);
+        cpu.write(0x1235, 0x38);
 
         cpu.registers.flags = 0;
         execute_instruction(&mut cpu);
 
-        assert_eq!(0xD9, cpu.memory_controller.borrow().read(0x1234));
-        assert_eq!(0x38, cpu.memory_controller.borrow().read(0x1235));
+        assert_eq!(0xD9, cpu.read(0x1234));
+        assert_eq!(0x38, cpu.read(0x1235));
     }
 
     #[test]
@@ -1150,14 +1404,14 @@ mod tests {
             &mut program, ENCODING_R4, 0x1234);
         update_program(&mut cpu, program, 0x2000);
 
-        cpu.memory_controller.borrow_mut().write(0x1234, 0xD9);
-        cpu.memory_controller.borrow_mut().write(0x1235, 0x38);
+        cpu.write(0x1234, 0xD9);
+        cpu.write(0x1235, 0x38);
 
         cpu.registers.flags = AUTO_INCREMENT_FLAG;
         execute_instruction(&mut cpu);
 
-        assert_eq!(0xDA, cpu.memory_controller.borrow().read(0x1234));
-        assert_eq!(0x38, cpu.memory_controller.borrow().read(0x1235));
+        assert_eq!(0xDA, cpu.read(0x1234));
+        assert_eq!(0x38, cpu.read(0x1235));
     }
 
     #[test]
@@ -1169,14 +1423,14 @@ mod tests {
             &mut program, ENCODING_R4, 0x1234);
         update_program(&mut cpu, program, 0x2000);
 
-        cpu.memory_controller.borrow_mut().write(0x1234, 0xFF);
-        cpu.memory_controller.borrow_mut().write(0x1235, 0x38);
+        cpu.write(0x1234, 0xFF);
+        cpu.write(0x1235, 0x38);
 
         cpu.registers.flags = AUTO_INCREMENT_FLAG;
         execute_instruction(&mut cpu);
 
-        assert_eq!(0x00, cpu.memory_controller.borrow().read(0x1234));
-        assert_eq!(0x39, cpu.memory_controller.borrow().read(0x1235));
+        assert_eq!(0x00, cpu.read(0x1234));
+        assert_eq!(0x39, cpu.read(0x1235));
     }
 
     #[test]
@@ -1188,14 +1442,233 @@ mod tests {
             &mut program, ENCODING_R4, 0x1234);
         update_program(&mut cpu, program, 0x2000);
 
-        cpu.memory_controller.borrow_mut().write(0x1234, 0xFF);
-        cpu.memory_controller.borrow_mut().write(0x1235, 0xFF);
+        cpu.write(0x1234, 0xFF);
+        cpu.write(0x1235, 0xFF);
 
         cpu.registers.flags = AUTO_INCREMENT_FLAG;
         execute_instruction(&mut cpu);
 
-        assert_eq!(0x00, cpu.memory_controller.borrow().read(0x1234));
-        assert_eq!(0x00, cpu.memory_controller.borrow().read(0x1235));
+        assert_eq!(0x00, cpu.read(0x1234));
+        assert_eq!(0x00, cpu.read(0x1235));
+    }
+
+    #[test]
+    fn store_immediate_generates_invalid_opcode_fault() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_store_immediate(
+            &mut program);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.write(ILLEGAL_OPCODE_VECTOR, 0x40);
+        cpu.write(ILLEGAL_OPCODE_VECTOR + 1, 0xF0);
+
+        cpu.registers.flags = 0;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0xF040, cpu.registers.pc);
+        assert_eq!(FAULT_FLAG, cpu.registers.flags);
+    }
+
+    #[test]
+    fn store_absolute_stores_value_into_memory() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_store_absolute(
+            &mut program, ENCODING_R4, 0x1234);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r4 = 0x30;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0x30, cpu.read(0x1234));
+     }
+
+    #[test]
+    fn store_absolute_does_not_modify_flags() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_store_absolute(
+            &mut program, ENCODING_R4, 0x1234);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = ZERO_FLAG | CARRY_FLAG | NEGATIVE_FLAG;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(
+            ZERO_FLAG | CARRY_FLAG | NEGATIVE_FLAG,
+            cpu.registers.flags);
+    }
+
+    #[test]
+    fn store_indexed_absolute_stores_value_into_memory() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_store_indexed_absolute(
+            &mut program,
+            ENCODING_R4,
+            0x1234,
+            ENCODING_R2);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r4 = 0xFE;
+        cpu.registers.r2 = 0xAB;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0xFE, cpu.read(0x1234 + 0xAB));
+    }
+
+    #[test]
+    fn store_indexed_absolute_does_not_modify_flags() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_store_indexed_absolute(
+            &mut program,
+            ENCODING_R4,
+            0x1234,
+            ENCODING_R2);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r4 = 0xFE;
+        cpu.registers.r2 = 0xAB;
+        cpu.registers.flags = ZERO_FLAG | CARRY_FLAG | NEGATIVE_FLAG;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(
+            ZERO_FLAG | CARRY_FLAG | NEGATIVE_FLAG,
+            cpu.registers.flags);
+    }
+
+    #[test]
+    fn store_indexed_absolute_does_not_increment_index_reg_if_flag_clear() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_store_indexed_absolute(
+            &mut program,
+            ENCODING_R4,
+            0x1234,
+            ENCODING_R2);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r4 = 0xFE;
+        cpu.registers.r2 = 0xAB;
+        cpu.registers.flags = 0;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0xAB, cpu.registers.r2);
+    }
+
+    #[test]
+    fn store_indexed_absolute_increments_index_reg_if_flag_set() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_store_indexed_absolute(
+            &mut program,
+            ENCODING_R4,
+            0x1234,
+            ENCODING_R2);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r4 = 0xFE;
+        cpu.registers.r2 = 0xAB;
+        cpu.registers.flags = AUTO_INCREMENT_FLAG;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0xAC, cpu.registers.r2);
+    }
+
+    #[test]
+    fn store_indirect_stores_value_into_memory() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_store_indirect(
+            &mut program, ENCODING_R4, 0x1234);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.write(0x1234, 0xD9);
+        cpu.write(0x1235, 0x38);
+
+        cpu.write(0x38D9, 0x00);
+
+        cpu.registers.r4 = 0x23;
+        execute_instruction(&mut cpu);
+
+        assert_eq!(0x23, cpu.read(0x38D9));
+    }
+
+    #[test]
+    fn store_indirect_does_not_modify_flags() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_store_indirect(
+            &mut program, ENCODING_R4, 0x1234);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.write(0x1234, 0xD9);
+        cpu.write(0x1235, 0x38);
+
+        cpu.write(0x38D9, 0x00);
+
+        cpu.registers.r4 = 0x23;
+        cpu.registers.flags = CARRY_FLAG | ZERO_FLAG | NEGATIVE_FLAG;
+        execute_instruction(&mut cpu);
+
+        assert_eq!(
+            CARRY_FLAG | ZERO_FLAG | NEGATIVE_FLAG,
+            cpu.registers.flags);
+    }
+
+    #[test]
+    fn store_indirect_does_not_increment_address_if_flag_is_cleared() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_store_indirect(
+            &mut program, ENCODING_R4, 0x1234);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.write(0x1234, 0xD9);
+        cpu.write(0x1235, 0x38);
+
+        cpu.write(0x38D9, 0x00);
+
+        cpu.registers.r4 = 0x23;
+        cpu.registers.flags = 0;
+        execute_instruction(&mut cpu);
+
+        assert_eq!(0xD9, cpu.read(0x1234));
+        assert_eq!(0x38, cpu.read(0x1235));
+    }
+
+    #[test]
+    fn store_indirect_increments_address_if_flag_is_set() {
+                let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_store_indirect(
+            &mut program, ENCODING_R4, 0x1234);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.write(0x1234, 0xD9);
+        cpu.write(0x1235, 0x38);
+
+        cpu.write(0x38D9, 0x00);
+
+        cpu.registers.r4 = 0x23;
+        cpu.registers.flags = AUTO_INCREMENT_FLAG;
+        execute_instruction(&mut cpu);
+
+        assert_eq!(0xDA, cpu.read(0x1234));
+        assert_eq!(0x38, cpu.read(0x1235));
     }
 
     #[test]
@@ -1452,8 +1925,6 @@ mod tests {
         execute_instruction(&mut cpu);
         assert_eq!(0x26, cpu.registers.r1);
     }
-
-
 
     #[test]
     fn add_without_carry_reg_immediate_sets_and_clears_zero_flag() {
@@ -1746,7 +2217,6 @@ mod tests {
         assert!(cpu.registers.carry_flag());
     }
 
-
     #[test]
     fn unsigned_multiply_unsets_carry_and_overflow_flags_if_high_byte_is_zero() {
         let mut cpu = create_test_cpu();
@@ -1770,6 +2240,45 @@ mod tests {
         execute_instruction(&mut cpu);
         assert!(!cpu.registers.overflow_flag());
         assert!(!cpu.registers.carry_flag());
+    }
+
+    #[test]
+    fn unsigned_multiply_reg_immediate_calculates_values_correctly() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_unsigned_multiply_reg_immediate(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            40);
+        emit_unsigned_multiply_reg_immediate(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            200);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 2;
+        cpu.registers.r2 = 5;
+        cpu.registers.r3 = 9;
+        cpu.registers.r4 = 8;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(200, cpu.registers.r3);
+        assert_eq!(0, cpu.registers.r4);
+
+        cpu.registers.r1 = 2;
+        cpu.registers.r2 = 5;
+        cpu.registers.r3 = 9;
+        cpu.registers.r4 = 8;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(232, cpu.registers.r3);
+        assert_eq!(3, cpu.registers.r4);
     }
 
     #[test]
@@ -2041,5 +2550,76 @@ mod tests {
         execute_instruction(&mut cpu);
         assert!(!cpu.registers.carry_flag());
         assert!(!cpu.registers.overflow_flag());
+    }
+
+
+    #[test]
+    fn signed_multiply_reg_immediate_calculates_values_correctly() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_signed_multiply_reg_immediate(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            40);
+        emit_signed_multiply_reg_immediate(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            127);
+        emit_signed_multiply_reg_immediate(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            2u8.wrapping_neg());
+        emit_signed_multiply_reg_immediate(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            100u8.wrapping_neg());
+
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 2;
+        cpu.registers.r2 = 5;
+        cpu.registers.r3 = 9;
+        cpu.registers.r4 = 8;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(200, cpu.registers.r3);
+        assert_eq!(0, cpu.registers.r4);
+
+        cpu.registers.r1 = 2;
+        cpu.registers.r2 = 5;
+        cpu.registers.r3 = 9;
+        cpu.registers.r4 = 8;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(123, cpu.registers.r3);
+        assert_eq!(2, cpu.registers.r4);
+
+        cpu.registers.r1 = 2;
+        cpu.registers.r2 = 5;
+        cpu.registers.r3 = 9;
+        cpu.registers.r4 = 8;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(10u8.wrapping_neg(), cpu.registers.r3);
+        assert_eq!(0xFF, cpu.registers.r4);
+
+        cpu.registers.r1 = 2;
+        cpu.registers.r2 = 5;
+        cpu.registers.r3 = 9;
+        cpu.registers.r4 = 8;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0x0C, cpu.registers.r3);
+        assert_eq!(0xFE, cpu.registers.r4);
     }
 }
