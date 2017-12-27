@@ -45,12 +45,14 @@ const STORE_REGISTER: u8 = 0x11;
 
 /* Arithmetic instructions */
 
-const ADD_WITH_CARRY:u8 = 0x30;
+const ADD_WITH_CARRY: u8 = 0x30;
 const ADD_WITHOUT_CARRY: u8 = 0x31;
 
 const SIGNED_MULTIPLY: u8 = 0x34;
-const UNSIGNED_MULTIPLY:u8 = 0x35;
+const UNSIGNED_MULTIPLY: u8 = 0x35;
 
+const SIGNED_DIVIDE: u8 = 0x36;
+const UNSIGNED_DIVIDE: u8 = 0x37;
 
 
 /* Flag instructions */
@@ -64,6 +66,7 @@ const SP_INITIAL_VALUE: u16 = 0x200;
 /* Interrupt vector table address locations */
 const RESET_VECTOR: u16 = 0x00;
 const ILLEGAL_OPCODE_VECTOR: u16 = 0x02;
+const DIVIDE_ERROR_VECTOR: u16 = 0x04;
 
 /*
     Micro ops that actually define what the CPU is doing currently.
@@ -108,6 +111,21 @@ enum MicroOp {
     SignedMultiplyInvertResultIfFlag,
     EndSignedMultiply,
     EndUnsignedMultiply,
+    BeginDivision,
+    DivideFetchImmediate,
+    DivideCheckDenominator,
+    SignedDivideInvertNegativeNumerator,
+    SignedDivideInvertNegativeDenominator,
+    DivideShiftRemainder,
+    DivideUpdateRemainderBit,
+    DivideShiftNumerator,
+    DivideTestRemainderDenominator,
+    DivideMaybeUpdateRemainder,
+    DivideMaybeUpdatedQuotient,
+    DivideShiftQuotinent,
+    SignedDivideMaybeNegateRemainder,
+    SignedDivideMaybeNegateQuotinent,
+    EndDivision,
 }
 
 /* CPU registers. Duh. */
@@ -127,10 +145,14 @@ struct StateMachine {
     micro_ops: Vec<MicroOp>,
     index: usize,
     value_register: u8,
+    value_register_2: u8,
     dest_src_register: u8,
     address_register: u16,
     indirect_address_register: u16,
     multiply_negate: bool,
+    divide_flag: bool,
+    negate_remainder: bool,
+    negate_quotinent: bool,
 }
 
 impl StateMachine {
@@ -139,10 +161,14 @@ impl StateMachine {
             micro_ops: vec![],
             index: 0,
             value_register: 0,
+            value_register_2: 0,
             dest_src_register: 0,
             address_register: 0,
             indirect_address_register: 0,
             multiply_negate: false,
+            divide_flag: false,
+            negate_remainder: false,
+            negate_quotinent: false,
         }
     }
 }
@@ -178,6 +204,10 @@ impl Registers {
 
     fn auto_increment_flag(&self) -> bool {
         self.flags & AUTO_INCREMENT_FLAG != 0
+    }
+
+    fn fault_flag(&self) -> bool {
+        self.flags & FAULT_FLAG != 0
     }
 
     fn set_zero_negative_flags(&mut self, value: u8) {
@@ -361,6 +391,8 @@ impl Cpu {
                 ADD_WITHOUT_CARRY => self.decode_add(addressing),
                 SIGNED_MULTIPLY => self.decode_imul(addressing),
                 UNSIGNED_MULTIPLY => self.decode_mul(addressing),
+                SIGNED_DIVIDE => self.decode_idiv(addressing),
+                UNSIGNED_DIVIDE => self.decode_div(addressing),
                 /* Status flag instructions  */
                 SET_AUTO_INCREMENT_FLAG => self.decode_sai(addressing),
                 CLEAR_AUTO_INCREMENT_FLAG => self.decode_cla(addressing),
@@ -593,6 +625,133 @@ impl Cpu {
                 self.state.micro_ops.push(MicroOp::EndUnsignedMultiply);
 
             }
+            _ => self.illegal_opcode(),
+        }
+    }
+
+    fn decode_idiv(&mut self, addressing: u8) {
+        match addressing {
+            REGISTER_REGISTER_ADDRESSING => {
+                self.state.micro_ops.push(MicroOp::FetchDestSrc);
+                self.state.micro_ops.push(MicroOp::BeginDivision);
+                self.state.micro_ops.push(MicroOp::DivideCheckDenominator);
+                self.state.micro_ops.push(
+                    MicroOp::SignedDivideInvertNegativeNumerator);
+                self.state.micro_ops.push(
+                    MicroOp::SignedDivideInvertNegativeDenominator);
+
+                for _ in 0..8 {
+                    self.state.micro_ops.push(
+                        MicroOp::DivideShiftRemainder);
+                    self.state.micro_ops.push(
+                        MicroOp::DivideUpdateRemainderBit);
+                    self.state.micro_ops.push(
+                        MicroOp::DivideShiftNumerator);
+                    self.state.micro_ops.push(
+                        MicroOp::DivideTestRemainderDenominator);
+                    self.state.micro_ops.push(
+                        MicroOp::DivideShiftQuotinent);
+                    self.state.micro_ops.push(
+                        MicroOp::DivideMaybeUpdateRemainder);
+                    self.state.micro_ops.push(
+                        MicroOp::DivideMaybeUpdatedQuotient);
+                }
+                self.state.micro_ops.push(
+                    MicroOp::SignedDivideMaybeNegateRemainder);
+                self.state.micro_ops.push(
+                    MicroOp::SignedDivideMaybeNegateQuotinent);
+                self.state.micro_ops.push(MicroOp::EndDivision);
+            },
+            REGISTER_IMMEDIATE_ADDRESSING => {
+                self.state.micro_ops.push(MicroOp::FetchDestSrc);
+                self.state.micro_ops.push(MicroOp::BeginDivision);
+                self.state.micro_ops.push(MicroOp::DivideFetchImmediate);
+                self.state.micro_ops.push(MicroOp::DivideCheckDenominator);
+                self.state.micro_ops.push(
+                    MicroOp::SignedDivideInvertNegativeNumerator);
+                self.state.micro_ops.push(
+                    MicroOp::SignedDivideInvertNegativeDenominator);
+
+                for _ in 0..8 {
+                    self.state.micro_ops.push(
+                        MicroOp::DivideShiftRemainder);
+                    self.state.micro_ops.push(
+                        MicroOp::DivideUpdateRemainderBit);
+                    self.state.micro_ops.push(
+                        MicroOp::DivideShiftNumerator);
+                    self.state.micro_ops.push(
+                        MicroOp::DivideTestRemainderDenominator);
+                    self.state.micro_ops.push(
+                        MicroOp::DivideShiftQuotinent);
+                    self.state.micro_ops.push(
+                        MicroOp::DivideMaybeUpdateRemainder);
+                    self.state.micro_ops.push(
+                        MicroOp::DivideMaybeUpdatedQuotient);
+                }
+                self.state.micro_ops.push(
+                    MicroOp::SignedDivideMaybeNegateRemainder);
+                self.state.micro_ops.push(
+                    MicroOp::SignedDivideMaybeNegateQuotinent);
+                self.state.micro_ops.push(MicroOp::EndDivision);
+            },
+            _ => self.illegal_opcode(),
+
+        }
+    }
+
+    fn decode_div(&mut self, addressing: u8) {
+        match addressing & 0x03 {
+            REGISTER_REGISTER_ADDRESSING => {
+
+                self.state.micro_ops.push(MicroOp::FetchDestSrc);
+                self.state.micro_ops.push(MicroOp::BeginDivision);
+                self.state.micro_ops.push(MicroOp::DivideCheckDenominator);
+
+
+                for _ in 0..8 {
+                    self.state.micro_ops.push(
+                        MicroOp::DivideShiftRemainder);
+                    self.state.micro_ops.push(
+                        MicroOp::DivideUpdateRemainderBit);
+                    self.state.micro_ops.push(
+                        MicroOp::DivideShiftNumerator);
+                    self.state.micro_ops.push(
+                        MicroOp::DivideTestRemainderDenominator);
+                    self.state.micro_ops.push(
+                        MicroOp::DivideShiftQuotinent);
+                    self.state.micro_ops.push(
+                        MicroOp::DivideMaybeUpdateRemainder);
+                    self.state.micro_ops.push(
+                        MicroOp::DivideMaybeUpdatedQuotient);
+                }
+
+                self.state.micro_ops.push(MicroOp::EndDivision);
+            },
+            REGISTER_IMMEDIATE_ADDRESSING => {
+                self.state.micro_ops.push(MicroOp::FetchDestSrc);
+                self.state.micro_ops.push(MicroOp::BeginDivision);
+                self.state.micro_ops.push(MicroOp::DivideFetchImmediate);
+                self.state.micro_ops.push(MicroOp::DivideCheckDenominator);
+
+                for _ in 0..8 {
+                    self.state.micro_ops.push(
+                        MicroOp::DivideShiftRemainder);
+                    self.state.micro_ops.push(
+                        MicroOp::DivideUpdateRemainderBit);
+                    self.state.micro_ops.push(
+                        MicroOp::DivideShiftNumerator);
+                    self.state.micro_ops.push(
+                        MicroOp::DivideTestRemainderDenominator);
+                    self.state.micro_ops.push(
+                        MicroOp::DivideShiftQuotinent);
+                    self.state.micro_ops.push(
+                        MicroOp::DivideMaybeUpdateRemainder);
+                    self.state.micro_ops.push(
+                        MicroOp::DivideMaybeUpdatedQuotient);
+                }
+
+                self.state.micro_ops.push(MicroOp::EndDivision);
+            },
             _ => self.illegal_opcode(),
         }
     }
@@ -862,6 +1021,112 @@ impl Cpu {
                     self.registers.set_carry_flag();
                 }
             }
+            MicroOp::BeginDivision => {
+                let denom_reg = (self.state.dest_src_register >> 6) & 0x03;
+                let numer_reg = (self.state.dest_src_register >> 4) & 0x03;
+
+                let denom = self.load_register(denom_reg);
+                let numer = self.load_register(numer_reg);
+
+                // quotinent
+                self.state.value_register = 0;
+                // remainder
+                self.state.value_register_2 = 0;
+
+                // reuse address register to store numerator
+                self.state.address_register = numer as u16;
+                // reuse reg to represent denominator
+                self.state.indirect_address_register = denom as u16;
+                self.state.divide_flag = false;
+                self.state.negate_quotinent = false;
+                self.state.negate_remainder = false;
+            },
+            MicroOp::DivideFetchImmediate => {
+                self.state.indirect_address_register = self.read_pc() as u16;
+            }
+            MicroOp::DivideCheckDenominator => {
+                 if self.state.indirect_address_register == 0 {
+                    self.divide_error();
+                }
+            },
+            MicroOp::SignedDivideInvertNegativeDenominator => {
+                if self.state.indirect_address_register > 127 {
+                    self.state.indirect_address_register =
+                        self.state.indirect_address_register.wrapping_neg()
+                        & 0xFF;;
+                    self.state.negate_quotinent = !self.state.negate_quotinent;
+                }
+            },
+            MicroOp::SignedDivideInvertNegativeNumerator => {
+                if self.state.address_register > 127 {
+                    self.state.address_register =
+                        self.state.address_register.wrapping_neg() & 0xFF;
+                    self.state.negate_quotinent = !self.state.negate_quotinent;
+                    self.state.negate_remainder = true;
+                }
+
+            },
+            MicroOp::DivideShiftRemainder => {
+                self.state.value_register_2 <<= 1;
+            },
+            MicroOp::DivideUpdateRemainderBit => {
+                self.state.value_register_2 |=
+                    ((self.state.address_register >> 7) as u8) & 0x01;
+            },
+            MicroOp::DivideShiftNumerator => {
+                self.state.address_register <<= 1;
+            },
+            MicroOp::DivideTestRemainderDenominator => {
+                self.state.divide_flag =
+                    self.state.value_register_2
+                    >= self.state.indirect_address_register as u8;
+            },
+            MicroOp::DivideShiftQuotinent => {
+                self.state.value_register <<= 1;
+            },
+            MicroOp::DivideMaybeUpdateRemainder => {
+                if self.state.divide_flag {
+                   self.state.value_register_2 -=
+                        self.state.indirect_address_register as u8;
+                }
+            },
+            MicroOp::DivideMaybeUpdatedQuotient => {
+                if self.state.divide_flag {
+                    self.state.value_register |= 1;
+                }
+            },
+            MicroOp::SignedDivideMaybeNegateQuotinent => {
+                if self.state.negate_quotinent {
+                    self.state.value_register =
+                        self.state.value_register.wrapping_neg();
+                }
+
+                let is_negative = self.state.value_register & 0x80 != 0;
+
+                // negate flag is set if the result should be negative,
+                // and result is negative only if negate flag is set.
+                // if result is negative without the flag being set,
+                // overflow has occured, e.g. we're trying to represent +128
+                // with signed number
+                if is_negative && !self.state.negate_quotinent {
+                    self.divide_error();
+                }
+            },
+            MicroOp::SignedDivideMaybeNegateRemainder => {
+                if self.state.negate_remainder {
+                    self.state.value_register_2 =
+                        self.state.value_register_2.wrapping_neg();
+                }
+            },
+            MicroOp::EndDivision => {
+                let remainder_reg = self.state.dest_src_register & 0x03;
+                let quotinent_reg = (self.state.dest_src_register >> 2) & 0x03;
+
+                let q = self.state.value_register;
+                let r = self.state.value_register_2;
+                self.store_register(quotinent_reg, q);
+                self.store_register(remainder_reg, r);
+            }
         }
 
         self.state.index += 1;
@@ -912,9 +1177,18 @@ impl Cpu {
 
 
     fn illegal_opcode(&mut self) {
+        self.fault(ILLEGAL_OPCODE_VECTOR);
+    }
+
+    fn divide_error(&mut self) {
+        self.fault(DIVIDE_ERROR_VECTOR);
+    }
+
+    fn fault(&mut self, vector: u16) {
         self.start_interrupt();
-        self.state.address_register = ILLEGAL_OPCODE_VECTOR;
+        self.state.address_register = vector;
         self.state.micro_ops.push(MicroOp::SetFaultFlag);
+        self.state.index = 0;
     }
 
     fn start_interrupt(&mut self) {
@@ -1131,6 +1405,62 @@ mod tests {
             (high_reg & 0x03) |
             ((low_reg & 0x03) << 2) |
             ((src_1 & 0x03) <<  4));
+        opcodes.push(immediate);
+    }
+
+    fn emit_unsigned_division_reg_reg(
+        opcodes: &mut Vec<u8>,
+        high_reg: u8,
+        low_reg: u8,
+        src_1: u8,
+        src_2: u8) {
+        opcodes.push((UNSIGNED_DIVIDE << 2) | REGISTER_REGISTER_ADDRESSING);
+        opcodes.push(
+            (high_reg & 0x03) |
+            ((low_reg & 0x03) << 2) |
+            ((src_1 & 0x03) << 4) |
+            ((src_2 & 0x03) << 6));
+    }
+
+    fn emit_unsigned_division_reg_immediate(
+        opcodes: &mut Vec<u8>,
+        high_reg: u8,
+        low_reg: u8,
+        src_1: u8,
+        immediate: u8) {
+        opcodes.push((UNSIGNED_DIVIDE << 2) | REGISTER_IMMEDIATE_ADDRESSING);
+        opcodes.push(
+            (high_reg & 0x03) |
+            ((low_reg & 0x03) << 2) |
+            ((src_1 & 0x03) << 4));
+        opcodes.push(immediate);
+    }
+
+    fn emit_signed_division_reg_reg(
+        opcodes: &mut Vec<u8>,
+        high_reg: u8,
+        low_reg: u8,
+        src_1: u8,
+        src_2: u8) {
+        opcodes.push((SIGNED_DIVIDE << 2) | REGISTER_REGISTER_ADDRESSING);
+        opcodes.push(
+            (high_reg & 0x03) |
+            ((low_reg & 0x03) << 2) |
+            ((src_1 & 0x03) << 4) |
+            ((src_2 & 0x03) << 6));
+    }
+
+    fn emit_signed_division_reg_immediate(
+        opcodes: &mut Vec<u8>,
+        high_reg: u8,
+        low_reg: u8,
+        src_1: u8,
+        immediate: u8) {
+        opcodes.push((SIGNED_DIVIDE << 2) | REGISTER_IMMEDIATE_ADDRESSING);
+        opcodes.push(
+            (high_reg & 0x03) |
+            ((low_reg & 0x03) << 2) |
+            ((src_1 & 0x03) << 4));
         opcodes.push(immediate);
     }
 
@@ -1551,7 +1881,7 @@ mod tests {
 
         execute_instruction(&mut cpu);
         assert_eq!(0xF040, cpu.registers.pc);
-        assert_eq!(FAULT_FLAG, cpu.registers.flags);
+        assert!(cpu.registers.fault_flag());
     }
 
     #[test]
@@ -3049,4 +3379,515 @@ mod tests {
         assert_eq!(0x0C, cpu.registers.r3);
         assert_eq!(0xFE, cpu.registers.r4);
     }
+
+    #[test]
+    fn unsigned_division_calculates_even_division_correctly() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_unsigned_division_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 5;
+        cpu.registers.r2 = 200;
+        cpu.registers.r3 = 9;
+        cpu.registers.r4 = 8;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(40, cpu.registers.r3);
+        assert_eq!(0, cpu.registers.r4);
+    }
+
+
+    #[test]
+    fn unsigned_division_reg_reg_calculates_uneven_division_correctly() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_unsigned_division_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 7;
+        cpu.registers.r2 = 200;
+        cpu.registers.r3 = 9;
+        cpu.registers.r4 = 8;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(28, cpu.registers.r3);
+        assert_eq!(4, cpu.registers.r4);
+    }
+
+    #[test]
+    fn unsigned_division_reg_reg_by_zero_generates_fault() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_unsigned_division_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = 0;
+        cpu.registers.r1 = 0;
+        cpu.registers.r2 = 200;
+
+        cpu.write(DIVIDE_ERROR_VECTOR, 0x2F);
+        cpu.write(DIVIDE_ERROR_VECTOR+1, 0x9A);
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0x9A2F, cpu.registers.pc);
+        assert!(cpu.registers.fault_flag());
+    }
+
+    #[test]
+    fn unsigned_division_reg_reg_sets_and_unsets_zero_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_unsigned_division_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+        emit_unsigned_division_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = 0;
+        cpu.registers.r1 = 7;
+        cpu.registers.r2 = 0;
+        cpu.registers.r3 = 9;
+        cpu.registers.r4 = 8;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0, cpu.registers.r3);
+        assert_eq!(0, cpu.registers.r4);
+        assert!(cpu.registers.zero_flag());
+
+
+        cpu.registers.flags = ZERO_FLAG;
+        cpu.registers.r1 = 7;
+        cpu.registers.r2 = 2;
+        cpu.registers.r3 = 9;
+        cpu.registers.r4 = 8;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0, cpu.registers.r3);
+        assert_eq!(2, cpu.registers.r4);
+        assert!(!cpu.registers.zero_flag());
+    }
+
+    #[test]
+    fn unsigned_division_reg_immediate_calculates_correct_value() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_unsigned_division_reg_immediate(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            6);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r2 = 16;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(2, cpu.registers.r3);
+        assert_eq!(4, cpu.registers.r4);
+    }
+
+    #[test]
+    fn unsigned_division_reg_immediate_generates_fault_with_div_zero() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_unsigned_division_reg_immediate(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            0);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r2 = 16;
+
+
+        cpu.write(DIVIDE_ERROR_VECTOR, 0x2F);
+        cpu.write(DIVIDE_ERROR_VECTOR+1, 0x9A);
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0x9A2F, cpu.registers.pc);
+        assert!(cpu.registers.fault_flag());
+    }
+
+    #[test]
+    fn unsigned_division_reg_immediate_sets_and_unsets_zero_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_unsigned_division_reg_immediate(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            7);
+        emit_unsigned_division_reg_immediate(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            7);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = 0;
+        cpu.registers.r2 = 0;
+        cpu.registers.r3 = 9;
+        cpu.registers.r4 = 8;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0, cpu.registers.r3);
+        assert_eq!(0, cpu.registers.r4);
+        assert!(cpu.registers.zero_flag());
+
+
+        cpu.registers.flags = ZERO_FLAG;
+        cpu.registers.r2 = 2;
+        cpu.registers.r3 = 9;
+        cpu.registers.r4 = 8;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0, cpu.registers.r3);
+        assert_eq!(2, cpu.registers.r4);
+        assert!(!cpu.registers.zero_flag());
+    }
+
+    #[test]
+    fn signed_division_reg_reg_calculates_positive_values_correctly() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_signed_division_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 7;
+        cpu.registers.r2 = 20;
+        cpu.registers.r3 = 9;
+        cpu.registers.r4 = 8;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(2, cpu.registers.r3);
+        assert_eq!(6, cpu.registers.r4);
+    }
+
+    #[test]
+    fn signed_division_reg_reg_calculates_positive_negative_values_correctly() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_signed_division_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 7u8.wrapping_neg();
+        cpu.registers.r2 = 20;
+        cpu.registers.r3 = 9;
+        cpu.registers.r4 = 8;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(2u8.wrapping_neg(), cpu.registers.r3);
+        assert_eq!(6, cpu.registers.r4);
+    }
+
+    #[test]
+    fn signed_division_reg_reg_calculates_negative_positive_values_correctly() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_signed_division_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 7;
+        cpu.registers.r2 = 20u8.wrapping_neg();
+        cpu.registers.r3 = 9;
+        cpu.registers.r4 = 8;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(2u8.wrapping_neg(), cpu.registers.r3);
+        assert_eq!(6u8.wrapping_neg(), cpu.registers.r4);
+    }
+
+    #[test]
+    fn signed_division_reg_reg_calculates_negative_negative_values_correctly() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_signed_division_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 7u8.wrapping_neg();
+        cpu.registers.r2 = 20u8.wrapping_neg();
+        cpu.registers.r3 = 9;
+        cpu.registers.r4 = 8;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(2, cpu.registers.r3);
+        assert_eq!(6u8.wrapping_neg(), cpu.registers.r4);
+    }
+
+    #[test]
+    fn signed_division_reg_reg_by_zero_generates_fault() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_signed_division_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = 0;
+        cpu.registers.r1 = 0;
+        cpu.registers.r2 = 200;
+
+        cpu.write(DIVIDE_ERROR_VECTOR, 0x2F);
+        cpu.write(DIVIDE_ERROR_VECTOR+1, 0x9A);
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0x9A2F, cpu.registers.pc);
+        assert!(cpu.registers.fault_flag());
+    }
+
+    #[test]
+    fn signed_division_reg_reg_unrepresentable_div_generates_fault() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_signed_division_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = 0;
+        // -128/-1 = 128, but signed 8-bit range is [-128, 127] --> invalid
+        cpu.registers.r1 = 1u8.wrapping_neg();
+        cpu.registers.r2 = 128u8.wrapping_neg();
+
+        cpu.write(DIVIDE_ERROR_VECTOR, 0x2F);
+        cpu.write(DIVIDE_ERROR_VECTOR+1, 0x9A);
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0x9A2F, cpu.registers.pc);
+        assert!(cpu.registers.fault_flag());
+    }
+
+    #[test]
+    fn signed_division_reg_reg_sets_and_unsets_zero_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_signed_division_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+        emit_signed_division_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = 0;
+        cpu.registers.r1 = 7;
+        cpu.registers.r2 = 0;
+        cpu.registers.r3 = 9;
+        cpu.registers.r4 = 8;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0, cpu.registers.r3);
+        assert_eq!(0, cpu.registers.r4);
+        assert!(cpu.registers.zero_flag());
+
+
+        cpu.registers.flags = ZERO_FLAG;
+        cpu.registers.r1 = 7;
+        cpu.registers.r2 = 2u8.wrapping_neg();
+        cpu.registers.r3 = 9;
+        cpu.registers.r4 = 8;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0, cpu.registers.r3);
+        assert_eq!(2u8.wrapping_neg(), cpu.registers.r4);
+        assert!(!cpu.registers.zero_flag());
+    }
+
+    #[test]
+    fn signed_division_reg_immediate_calculates_correct_value() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_signed_division_reg_immediate(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            6u8.wrapping_neg());
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r2 = 16;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(2u8.wrapping_neg(), cpu.registers.r3);
+        assert_eq!(4, cpu.registers.r4);
+    }
+
+    #[test]
+    fn signed_division_reg_immediate_generates_fault_with_div_zero() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_signed_division_reg_immediate(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            0);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r2 = 16;
+
+        cpu.write(DIVIDE_ERROR_VECTOR, 0x2F);
+        cpu.write(DIVIDE_ERROR_VECTOR+1, 0x9A);
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0x9A2F, cpu.registers.pc);
+        assert!(cpu.registers.fault_flag());
+    }
+
+    #[test]
+    fn signed_division_reg_immediate_faults_with_unrepresentable_result() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_signed_division_reg_immediate(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            1u8.wrapping_neg());
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r2 = 128u8.wrapping_neg();
+
+        cpu.write(DIVIDE_ERROR_VECTOR, 0x2F);
+        cpu.write(DIVIDE_ERROR_VECTOR+1, 0x9A);
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0x9A2F, cpu.registers.pc);
+        assert!(cpu.registers.fault_flag());
+    }
+
+    #[test]
+    fn signed_division_reg_immediate_sets_and_unsets_zero_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_signed_division_reg_immediate(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            7);
+        emit_signed_division_reg_immediate(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2,
+            7);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = 0;
+        cpu.registers.r2 = 0;
+        cpu.registers.r3 = 9;
+        cpu.registers.r4 = 8;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0, cpu.registers.r3);
+        assert_eq!(0, cpu.registers.r4);
+        assert!(cpu.registers.zero_flag());
+
+        cpu.registers.flags = ZERO_FLAG;
+        cpu.registers.r2 = 2;
+        cpu.registers.r3 = 9;
+        cpu.registers.r4 = 8;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0, cpu.registers.r3);
+        assert_eq!(2, cpu.registers.r4);
+        assert!(!cpu.registers.zero_flag());
+    }
+
 }
