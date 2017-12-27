@@ -55,6 +55,10 @@ const SIGNED_DIVIDE: u8 = 0x36;
 const UNSIGNED_DIVIDE: u8 = 0x37;
 
 
+/* Bitwise operations */
+const BITWISE_AND: u8 = 0x20;
+
+
 /* Flag instructions */
 const SET_AUTO_INCREMENT_FLAG: u8 = 0x07;
 const CLEAR_AUTO_INCREMENT_FLAG: u8 = 0x06;
@@ -126,6 +130,8 @@ enum MicroOp {
     SignedDivideMaybeNegateRemainder,
     SignedDivideMaybeNegateQuotinent,
     EndDivision,
+    BitwiseAndRegister,
+    BitwiseAndImmediate,
 }
 
 /* CPU registers. Duh. */
@@ -393,10 +399,11 @@ impl Cpu {
                 UNSIGNED_MULTIPLY => self.decode_mul(addressing),
                 SIGNED_DIVIDE => self.decode_idiv(addressing),
                 UNSIGNED_DIVIDE => self.decode_div(addressing),
+                /* Bitwise operations */
+                BITWISE_AND => self.decode_and(addressing),
                 /* Status flag instructions  */
                 SET_AUTO_INCREMENT_FLAG => self.decode_sai(addressing),
                 CLEAR_AUTO_INCREMENT_FLAG => self.decode_cla(addressing),
-
                 _ => self.illegal_opcode(),
             }
         } else {
@@ -753,6 +760,21 @@ impl Cpu {
                 self.state.micro_ops.push(MicroOp::EndDivision);
             },
             _ => self.illegal_opcode(),
+        }
+    }
+
+    fn decode_and(&mut self, addressing: u8) {
+        match addressing & 0x03 {
+            REGISTER_REGISTER_ADDRESSING => {
+                self.state.micro_ops.push(MicroOp::FetchDestSrc);
+                self.state.micro_ops.push(MicroOp::BitwiseAndRegister);
+            },
+            REGISTER_IMMEDIATE_ADDRESSING => {
+                self.state.micro_ops.push(MicroOp::FetchDestSrc);
+                self.state.micro_ops.push(MicroOp::FetchValue);
+                self.state.micro_ops.push(MicroOp::BitwiseAndImmediate);
+            },
+            _ =>  self.illegal_opcode(),
         }
     }
 
@@ -1126,7 +1148,28 @@ impl Cpu {
                 let r = self.state.value_register_2;
                 self.store_register(quotinent_reg, q);
                 self.store_register(remainder_reg, r);
-            }
+            },
+            MicroOp::BitwiseAndRegister => {
+                let destination = self.state.dest_src_register & 0x03;
+                let src1 = (self.state.dest_src_register >> 2) & 0x03;
+                let src2 = (self.state.dest_src_register >> 4) & 0x03;
+
+                let src1val = self.load_register(src1);
+                let src2val = self.load_register(src2);
+                let result = src1val & src2val;
+
+                self.store_register(destination, result);
+            },
+            MicroOp::BitwiseAndImmediate => {
+                let destination = self.state.dest_src_register & 0x03;
+                let src1 = (self.state.dest_src_register >> 2) & 0x03;
+
+                let src1val = self.load_register(src1);
+                let src2val = self.state.value_register;
+                let result = src1val & src2val;
+
+                self.store_register(destination, result);
+            },
         }
 
         self.state.index += 1;
@@ -1464,6 +1507,29 @@ mod tests {
         opcodes.push(immediate);
     }
 
+    fn emit_bitwise_and_reg_reg(
+        opcodes: &mut Vec<u8>,
+        destination: u8,
+        src_1: u8,
+        src_2: u8) {
+        opcodes.push((BITWISE_AND << 2) | REGISTER_REGISTER_ADDRESSING);
+        opcodes.push(
+            (destination & 0x03) |
+            ((src_1 & 0x03) << 2) |
+            ((src_2 & 0x03) << 4));
+    }
+
+    fn emit_bitwise_and_reg_immediate(
+        opcodes: &mut Vec<u8>,
+        destination: u8,
+        src_1: u8,
+        immediate: u8) {
+        opcodes.push((BITWISE_AND << 2) | REGISTER_IMMEDIATE_ADDRESSING);
+        opcodes.push(
+            (destination & 0x03) |
+            ((src_1 & 0x03) << 2));
+        opcodes.push(immediate);
+    }
 
     fn update_program(cpu: &mut Cpu, program: Vec<u8>, load_address: u16) {
         cpu.registers.pc = load_address;
@@ -3890,4 +3956,182 @@ mod tests {
         assert!(!cpu.registers.zero_flag());
     }
 
+
+    #[test]
+    fn bitwise_and_reg_reg_stores_correct_result_in_destination_register() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_bitwise_and_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 0xAF;
+        cpu.registers.r2 = 0xCE;
+        cpu.registers.r3 = 0;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0x8E, cpu.registers.r3);
+    }
+
+    #[test]
+    fn bitwise_and_reg_reg_sets_and_unsets_zero_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_bitwise_and_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+        emit_bitwise_and_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = ZERO_FLAG;
+        cpu.registers.r1 = 0xAF;
+        cpu.registers.r2 = 0xCE;
+        cpu.registers.r3 = 0;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.zero_flag());
+
+        cpu.registers.flags = 0;
+        cpu.registers.r1 = 0x10;
+        cpu.registers.r2 = 0x8F;
+        cpu.registers.r3 = 0;
+
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.zero_flag());
+    }
+
+    #[test]
+    fn bitwise_and_reg_reg_sets_and_unsets_negative_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_bitwise_and_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+        emit_bitwise_and_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = NEGATIVE_FLAG;
+        cpu.registers.r1 = 0x0F;
+        cpu.registers.r2 = 0x0E;
+        cpu.registers.r3 = 0;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.negative_flag());
+
+        cpu.registers.flags = 0;
+        cpu.registers.r1 = 0xF0;
+        cpu.registers.r2 = 0x8F;
+        cpu.registers.r3 = 0;
+
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.negative_flag());
+    }
+
+
+    #[test]
+    fn bitwise_and_immediate_stores_correct_result_in_destination_register() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_bitwise_and_reg_immediate(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            0xAF);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r2 = 0xCE;
+        cpu.registers.r3 = 0;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0x8E, cpu.registers.r3);
+    }
+
+    #[test]
+    fn bitwise_and_immediate_sets_and_unsets_zero_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_bitwise_and_reg_immediate(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            0xAF);
+        emit_bitwise_and_reg_immediate(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            0x10);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = ZERO_FLAG;
+        cpu.registers.r2 = 0xCE;
+        cpu.registers.r3 = 0;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.zero_flag());
+
+        cpu.registers.flags = 0;
+        cpu.registers.r2 = 0x8F;
+        cpu.registers.r3 = 0;
+
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.zero_flag());
+    }
+
+    #[test]
+    fn bitwise_and_immediate_sets_and_unsets_negative_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_bitwise_and_reg_immediate(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            0x0F);
+        emit_bitwise_and_reg_immediate(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            0xF0);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = NEGATIVE_FLAG;
+        cpu.registers.r2 = 0x0E;
+        cpu.registers.r3 = 0;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.negative_flag());
+
+        cpu.registers.flags = 0;
+        cpu.registers.r2 = 0x8F;
+        cpu.registers.r3 = 0;
+
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.negative_flag());
+    }
 }
