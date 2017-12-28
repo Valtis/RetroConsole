@@ -54,6 +54,15 @@ const UNSIGNED_MULTIPLY: u8 = 0x35;
 const SIGNED_DIVIDE: u8 = 0x36;
 const UNSIGNED_DIVIDE: u8 = 0x37;
 
+const ARITHMETIC_SHIFT_LEFT: u8 = 0x38;
+const ARITHMETIC_SHIFT_RIGHT: u8 = 0x39;
+
+const LOGICAL_SHIFT_RIGHT: u8 = 0x3A;
+// logical shift right === arithmetic shift right
+
+const ROTATE_LEFT: u8 = 0x3B;
+const ROTATE_RIGHT: u8 = 0x3C;
+
 
 /* Bitwise operations */
 const BITWISE_AND: u8 = 0x20;
@@ -73,6 +82,7 @@ const SP_INITIAL_VALUE: u16 = 0x200;
 const RESET_VECTOR: u16 = 0x00;
 const ILLEGAL_OPCODE_VECTOR: u16 = 0x02;
 const DIVIDE_ERROR_VECTOR: u16 = 0x04;
+const DIVIDE_OVERFLOW_VECTOR: u16 = 0x06;
 
 /*
     Micro ops that actually define what the CPU is doing currently.
@@ -132,6 +142,8 @@ enum MicroOp {
     SignedDivideMaybeNegateRemainder,
     SignedDivideMaybeNegateQuotinent,
     EndDivision,
+    ArithmeticShiftLeftRegister,
+    ArithmeticShiftLeftImmediate,
     BitwiseAndRegister,
     BitwiseAndImmediate,
     BitwiseOrRegister,
@@ -404,6 +416,7 @@ impl Cpu {
                 UNSIGNED_MULTIPLY => self.decode_mul(addressing),
                 SIGNED_DIVIDE => self.decode_idiv(addressing),
                 UNSIGNED_DIVIDE => self.decode_div(addressing),
+                ARITHMETIC_SHIFT_LEFT => self.decode_asl(addressing),
                 /* Bitwise operations */
                 BITWISE_AND => self.decode_and(addressing),
                 BITWISE_OR => self.decode_or(addressing),
@@ -765,6 +778,23 @@ impl Cpu {
                 }
 
                 self.state.micro_ops.push(MicroOp::EndDivision);
+            },
+            _ => self.illegal_opcode(),
+        }
+    }
+
+    fn decode_asl(&mut self, addressing: u8) {
+        match addressing & 0x03 {
+            REGISTER_REGISTER_ADDRESSING => {
+                self.state.micro_ops.push(MicroOp::FetchDestSrc);
+                self.state.micro_ops.push(
+                    MicroOp::ArithmeticShiftLeftRegister);
+            },
+            REGISTER_IMMEDIATE_ADDRESSING => {
+                self.state.micro_ops.push(MicroOp::FetchDestSrc);
+                self.state.micro_ops.push(MicroOp::FetchValue);
+                self.state.micro_ops.push(
+                    MicroOp::ArithmeticShiftLeftImmediate);
             },
             _ => self.illegal_opcode(),
         }
@@ -1166,7 +1196,7 @@ impl Cpu {
                 // overflow has occured, e.g. we're trying to represent +128
                 // with signed number
                 if is_negative && !self.state.negate_quotinent {
-                    self.divide_error();
+                    self.divide_overflow();
                 }
             },
             MicroOp::SignedDivideMaybeNegateRemainder => {
@@ -1183,6 +1213,29 @@ impl Cpu {
                 let r = self.state.value_register_2;
                 self.store_register(quotinent_reg, q);
                 self.store_register(remainder_reg, r);
+            },
+            MicroOp::ArithmeticShiftLeftRegister => {
+                let destination = self.state.dest_src_register & 0x03;
+                let src1 = (self.state.dest_src_register >> 2) & 0x03;
+                let src2 = (self.state.dest_src_register >> 4) & 0x03;
+
+                let src1val = self.load_register(src1);
+                let src2val = self.load_register(src2);
+                let result = (src1val as u16) << ((src2val & 0x07) as u16);
+                self.registers.set_carry_flag_on_value(result);
+
+                self.store_register(destination, result as u8);
+            },
+            MicroOp::ArithmeticShiftLeftImmediate => {
+                let destination = self.state.dest_src_register & 0x03;
+                let src1 = (self.state.dest_src_register >> 2) & 0x03;
+
+                let src1val = self.load_register(src1);
+                let src2val = self.state.value_register;
+                let result = (src1val as u16) << ((src2val & 0x07) as u16);
+                self.registers.set_carry_flag_on_value(result);
+
+                self.store_register(destination, result as u8);
             },
             MicroOp::BitwiseAndRegister => {
                 let destination = self.state.dest_src_register & 0x03;
@@ -1303,6 +1356,11 @@ impl Cpu {
     fn divide_error(&mut self) {
         self.fault(DIVIDE_ERROR_VECTOR);
     }
+
+    fn divide_overflow(&mut self) {
+        self.fault(DIVIDE_OVERFLOW_VECTOR);
+    }
+
 
     fn fault(&mut self, vector: u16) {
         self.start_interrupt();
@@ -1581,6 +1639,132 @@ mod tests {
             (high_reg & 0x03) |
             ((low_reg & 0x03) << 2) |
             ((src_1 & 0x03) << 4));
+        opcodes.push(immediate);
+    }
+
+    fn emit_arithmetic_shift_left_reg_reg(
+        opcodes: &mut Vec<u8>,
+        destination: u8,
+        src_1: u8,
+        src_2: u8) {
+        opcodes.push(
+            (ARITHMETIC_SHIFT_LEFT << 2) | REGISTER_REGISTER_ADDRESSING);
+        opcodes.push(
+            (destination & 0x03) |
+            ((src_1 & 0x03) << 2) |
+            ((src_2 & 0x03) << 4));
+    }
+
+    fn emit_arithmetic_shift_left_reg_immediate(
+        opcodes: &mut Vec<u8>,
+        destination: u8,
+        src_1: u8,
+        immediate: u8) {
+        opcodes.push(
+            (ARITHMETIC_SHIFT_LEFT << 2) | REGISTER_IMMEDIATE_ADDRESSING);
+        opcodes.push(
+            (destination & 0x03) |
+            ((src_1 & 0x03) << 2));
+        opcodes.push(immediate);
+    }
+
+    fn emit_arithmetic_shift_right_reg_reg(
+        opcodes: &mut Vec<u8>,
+        destination: u8,
+        src_1: u8,
+        src_2: u8) {
+        opcodes.push(
+            (ARITHMETIC_SHIFT_RIGHT << 2) | REGISTER_REGISTER_ADDRESSING);
+        opcodes.push(
+            (destination & 0x03) |
+            ((src_1 & 0x03) << 2) |
+            ((src_2 & 0x03) << 4));
+    }
+
+    fn emit_arithmetic_shift_right_reg_immediate(
+        opcodes: &mut Vec<u8>,
+        destination: u8,
+        src_1: u8,
+        immediate: u8) {
+        opcodes.push(
+            (ARITHMETIC_SHIFT_RIGHT << 2) | REGISTER_IMMEDIATE_ADDRESSING);
+        opcodes.push(
+            (destination & 0x03) |
+            ((src_1 & 0x03) << 2));
+        opcodes.push(immediate);
+    }
+
+    fn emit_logical_shift_right_reg_reg(
+        opcodes: &mut Vec<u8>,
+        destination: u8,
+        src_1: u8,
+        src_2: u8) {
+        opcodes.push(
+            (LOGICAL_SHIFT_RIGHT << 2) | REGISTER_REGISTER_ADDRESSING);
+        opcodes.push(
+            (destination & 0x03) |
+            ((src_1 & 0x03) << 2) |
+            ((src_2 & 0x03) << 4));
+    }
+
+    fn emit_logical_shift_right_reg_immediate(
+        opcodes: &mut Vec<u8>,
+        destination: u8,
+        src_1: u8,
+        immediate: u8) {
+        opcodes.push(
+            (LOGICAL_SHIFT_RIGHT << 2) | REGISTER_IMMEDIATE_ADDRESSING);
+        opcodes.push(
+            (destination & 0x03) |
+            ((src_1 & 0x03) << 2));
+        opcodes.push(immediate);
+    }
+
+    fn emit_rotate_left_reg_reg(
+        opcodes: &mut Vec<u8>,
+        destination: u8,
+        src_1: u8,
+        src_2: u8) {
+        opcodes.push((ROTATE_LEFT << 2) | REGISTER_REGISTER_ADDRESSING);
+        opcodes.push(
+            (destination & 0x03) |
+            ((src_1 & 0x03) << 2) |
+            ((src_2 & 0x03) << 4));
+    }
+
+    fn emit_rotate_left_reg_immediate(
+        opcodes: &mut Vec<u8>,
+        destination: u8,
+        src_1: u8,
+        immediate: u8) {
+        opcodes.push((ROTATE_LEFT << 2) | REGISTER_IMMEDIATE_ADDRESSING);
+        opcodes.push(
+            (destination & 0x03) |
+            ((src_1 & 0x03) << 2));
+        opcodes.push(immediate);
+    }
+
+    fn emit_rotate_right_reg_reg(
+        opcodes: &mut Vec<u8>,
+        destination: u8,
+        src_1: u8,
+        src_2: u8) {
+        opcodes.push((ROTATE_RIGHT << 2) | REGISTER_REGISTER_ADDRESSING);
+        opcodes.push(
+            (destination & 0x03) |
+            ((src_1 & 0x03) << 2) |
+            ((src_2 & 0x03) << 4));
+    }
+
+    fn emit_rotate_right_reg_immediate(
+        opcodes: &mut Vec<u8>,
+        destination: u8,
+        src_1: u8,
+        immediate: u8) {
+        opcodes.push((ROTATE_RIGHT << 2) | REGISTER_IMMEDIATE_ADDRESSING);
+        opcodes.push(
+            (destination & 0x03) |
+            ((src_1 & 0x03) << 2));
         opcodes.push(immediate);
     }
 
@@ -3919,8 +4103,8 @@ mod tests {
         cpu.registers.r1 = 1u8.wrapping_neg();
         cpu.registers.r2 = 128u8.wrapping_neg();
 
-        cpu.write(DIVIDE_ERROR_VECTOR, 0x2F);
-        cpu.write(DIVIDE_ERROR_VECTOR+1, 0x9A);
+        cpu.write(DIVIDE_OVERFLOW_VECTOR, 0x2F);
+        cpu.write(DIVIDE_OVERFLOW_VECTOR+1, 0x9A);
 
         execute_instruction(&mut cpu);
         assert_eq!(0x9A2F, cpu.registers.pc);
@@ -4032,8 +4216,8 @@ mod tests {
 
         cpu.registers.r2 = 128u8.wrapping_neg();
 
-        cpu.write(DIVIDE_ERROR_VECTOR, 0x2F);
-        cpu.write(DIVIDE_ERROR_VECTOR+1, 0x9A);
+        cpu.write(DIVIDE_OVERFLOW_VECTOR, 0x2F);
+        cpu.write(DIVIDE_OVERFLOW_VECTOR+1, 0x9A);
 
         execute_instruction(&mut cpu);
         assert_eq!(0x9A2F, cpu.registers.pc);
@@ -4079,6 +4263,340 @@ mod tests {
         assert_eq!(0, cpu.registers.r3);
         assert_eq!(2, cpu.registers.r4);
         assert!(!cpu.registers.zero_flag());
+    }
+
+    #[test]
+    fn arithmetic_shift_left_reg_reg_stores_correct_value_in_dst_reg() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_arithmetic_shift_left_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 3;
+        cpu.registers.r2 = 18;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(18 << 3, cpu.registers.r3);
+    }
+
+    #[test]
+    fn arithmetic_shift_left_reg_reg_large_shift_wraps_around() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_arithmetic_shift_left_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 8;
+        cpu.registers.r2 = 18;
+        cpu.registers.r3 = 20;
+
+        // shift amount mod 8: 8 mod 8 = 0
+        execute_instruction(&mut cpu);
+        assert_eq!(18, cpu.registers.r3);
+    }
+
+    #[test]
+    fn arithmetic_shift_left_reg_reg_sets_and_unsets_carry_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_arithmetic_shift_left_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+        emit_arithmetic_shift_left_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+        emit_arithmetic_shift_left_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+        emit_arithmetic_shift_left_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = 0;
+        cpu.registers.r1 = 1;
+        cpu.registers.r2 = 0xFF;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.carry_flag());
+
+        cpu.registers.flags = CARRY_FLAG;
+        cpu.registers.r1 = 1;
+        cpu.registers.r2 = 0x7F;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.carry_flag());
+
+        cpu.registers.flags = CARRY_FLAG;
+        cpu.registers.r1 = 8; // effectively 0 due to modulo
+        cpu.registers.r2 = 0xFF;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.carry_flag());
+
+        cpu.registers.flags = CARRY_FLAG;
+        cpu.registers.r1 = 7;
+        cpu.registers.r2 = 0x02;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.carry_flag());
+    }
+
+    #[test]
+    fn arithmetic_shift_left_reg_reg_sets_and_unsets_zero_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_arithmetic_shift_left_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+        emit_arithmetic_shift_left_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = 0;
+        cpu.registers.r1 = 1;
+        cpu.registers.r2 = 0x80;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.zero_flag());
+
+        cpu.registers.flags = ZERO_FLAG;
+        cpu.registers.r1 = 1;
+        cpu.registers.r2 = 0x7F;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.zero_flag());
+    }
+
+    #[test]
+    fn arithmetic_shift_left_reg_reg_sets_and_unsets_negative_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_arithmetic_shift_left_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+        emit_arithmetic_shift_left_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = NEGATIVE_FLAG;
+        cpu.registers.r1 = 1;
+        cpu.registers.r2 = 0x30;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.negative_flag());
+
+        cpu.registers.flags = 0;
+        cpu.registers.r1 = 1;
+        cpu.registers.r2 = 0x7F;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.negative_flag());
+    }
+
+    #[test]
+    fn arithmetic_shift_left_reg_immediate_stores_correct_value_in_dst_reg() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_arithmetic_shift_left_reg_immediate(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            3);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r2 = 18;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(18 << 3, cpu.registers.r3);
+    }
+
+    #[test]
+    fn arithmetic_shift_left_reg_immediate_large_shift_wraps_around() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_arithmetic_shift_left_reg_immediate(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            8);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r2 = 18;
+        cpu.registers.r3 = 20;
+
+        // shift amount mod 8: 8 mod 8 = 0
+        execute_instruction(&mut cpu);
+        assert_eq!(18, cpu.registers.r3);
+    }
+
+    #[test]
+    fn arithmetic_shift_left_reg_immediate_sets_and_unsets_carry_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_arithmetic_shift_left_reg_immediate(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            1);
+        emit_arithmetic_shift_left_reg_immediate(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            1);
+        emit_arithmetic_shift_left_reg_immediate(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            8);
+        emit_arithmetic_shift_left_reg_immediate(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            7);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = 0;
+        cpu.registers.r2 = 0xFF;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.carry_flag());
+
+        cpu.registers.flags = CARRY_FLAG;
+        cpu.registers.r2 = 0x7F;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.carry_flag());
+
+        cpu.registers.flags = CARRY_FLAG;
+        cpu.registers.r2 = 0xFF;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.carry_flag());
+
+        cpu.registers.flags = CARRY_FLAG;
+        cpu.registers.r2 = 0x02;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.carry_flag());
+    }
+
+    #[test]
+    fn arithmetic_shift_left_reg_immediate_sets_and_unsets_zero_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_arithmetic_shift_left_reg_immediate(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            1);
+        emit_arithmetic_shift_left_reg_immediate(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            1);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = 0;
+        cpu.registers.r2 = 0x80;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.zero_flag());
+
+        cpu.registers.flags = ZERO_FLAG;
+        cpu.registers.r2 = 0x7F;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.zero_flag());
+    }
+
+    #[test]
+    fn arithmetic_shift_left_reg_immediate_sets_and_unsets_negative_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_arithmetic_shift_left_reg_immediate(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            1);
+        emit_arithmetic_shift_left_reg_immediate(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            1);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = NEGATIVE_FLAG;
+        cpu.registers.r2 = 0x30;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.negative_flag());
+
+        cpu.registers.flags = 0;
+        cpu.registers.r2 = 0x7F;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.negative_flag());
     }
 
     #[test]
