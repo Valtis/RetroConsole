@@ -147,6 +147,10 @@ enum MicroOp {
     ArithmeticShiftRightImmediate,
     LogicalShiftRightRegister,
     LogicalShiftRightImmediate,
+    RotateLeftRegister,
+    RotateLeftImmediate,
+    RotateRightRegister,
+    RotateRightImmediate,
     BitwiseAndRegister,
     BitwiseAndImmediate,
     BitwiseOrRegister,
@@ -345,17 +349,17 @@ impl Cpu {
         // temp code: create test program for the cpu
 
       let temp_instructions = vec![
-            // LDR r1, #$FF
+            // LDR r1, -8
             (LOAD_REGISTER << 2) | IMMEDIATE_ADDRESSING,
             ENCODING_R1,
             (8 as u8).wrapping_neg(),
-            // LDR r1, #$03
+            // LDR r2, 24
             (LOAD_REGISTER << 2) | IMMEDIATE_ADDRESSING,
             ENCODING_R2,
-            0x09,
-            // MUL r4, r3, r2, r1
-            (SIGNED_MULTIPLY << 2) | REGISTER_REGISTER_ADDRESSING,
-            0b00011011
+            24,
+            // DIV r4, r3, r2, r1
+            (SIGNED_DIVIDE << 2) | REGISTER_REGISTER_ADDRESSING,
+            0b00011011,
         ];
 
         for (i, v) in temp_instructions.iter().enumerate() {
@@ -423,6 +427,8 @@ impl Cpu {
                 ARITHMETIC_SHIFT_LEFT => self.decode_asl(addressing),
                 ARITHMETIC_SHIFT_RIGHT => self.decode_asr(addressing),
                 LOGICAL_SHIFT_RIGHT => self.decode_lsr(addressing),
+                ROTATE_LEFT => self.decode_rol(addressing),
+                ROTATE_RIGHT => self.decode_ror(addressing),
                 BITWISE_AND => self.decode_and(addressing),
                 BITWISE_OR => self.decode_or(addressing),
                 BITWISE_XOR => self.decode_xor(addressing),
@@ -834,6 +840,36 @@ impl Cpu {
                 self.state.micro_ops.push(MicroOp::FetchValue);
                 self.state.micro_ops.push(
                     MicroOp::LogicalShiftRightImmediate);
+            },
+            _ => self.illegal_opcode(),
+        }
+    }
+
+    fn decode_rol(&mut self, addressing: u8) {
+        match addressing & 0x03 {
+            REGISTER_REGISTER_ADDRESSING => {
+                self.state.micro_ops.push(MicroOp::FetchDestSrc);
+                self.state.micro_ops.push(MicroOp::RotateLeftRegister);
+            },
+            REGISTER_IMMEDIATE_ADDRESSING => {
+                self.state.micro_ops.push(MicroOp::FetchDestSrc);
+                self.state.micro_ops.push(MicroOp::FetchValue);
+                self.state.micro_ops.push(MicroOp::RotateLeftImmediate);
+            },
+            _ => self.illegal_opcode(),
+        }
+    }
+
+    fn decode_ror(&mut self, addressing: u8) {
+        match addressing & 0x03 {
+            REGISTER_REGISTER_ADDRESSING => {
+                self.state.micro_ops.push(MicroOp::FetchDestSrc);
+                self.state.micro_ops.push(MicroOp::RotateRightRegister);
+            },
+            REGISTER_IMMEDIATE_ADDRESSING => {
+                self.state.micro_ops.push(MicroOp::FetchDestSrc);
+                self.state.micro_ops.push(MicroOp::FetchValue);
+                self.state.micro_ops.push(MicroOp::RotateRightImmediate);
             },
             _ => self.illegal_opcode(),
         }
@@ -1341,6 +1377,49 @@ impl Cpu {
                 }
 
                 self.store_register(destination, (result >> 8) as u8);
+            },
+            MicroOp::RotateLeftRegister => {
+                let destination = self.state.dest_src_register & 0x03;
+                let src1 = (self.state.dest_src_register >> 2) & 0x03;
+                let src2 = (self.state.dest_src_register >> 4) & 0x03;
+
+                let src1val = self.load_register(src1);
+                let src2val = self.load_register(src2) as u32;
+                let result = src1val.rotate_left(src2val);
+
+                self.store_register(destination, result);
+            },
+            MicroOp::RotateLeftImmediate => {
+                let destination = self.state.dest_src_register & 0x03;
+                let src1 = (self.state.dest_src_register >> 2) & 0x03;
+
+                let src1val = self.load_register(src1);
+                let src2val = self.state.value_register as u32;
+                let result = src1val.rotate_left(src2val);
+
+                self.store_register(destination, result);
+            },
+            MicroOp::RotateRightRegister => {
+                let destination = self.state.dest_src_register & 0x03;
+                let src1 = (self.state.dest_src_register >> 2) & 0x03;
+                let src2 = (self.state.dest_src_register >> 4) & 0x03;
+
+                let src1val = self.load_register(src1);
+                let src2val = self.load_register(src2) as u32;
+
+                let result = src1val.rotate_right(src2val);
+
+                self.store_register(destination, result);
+            },
+            MicroOp::RotateRightImmediate => {
+                let destination = self.state.dest_src_register & 0x03;
+                let src1 = (self.state.dest_src_register >> 2) & 0x03;
+
+                let src1val = self.load_register(src1);
+                let src2val = self.state.value_register as u32;
+                let result = src1val.rotate_right(src2val);
+
+                self.store_register(destination, result);
             },
             MicroOp::BitwiseAndRegister => {
                 let destination = self.state.dest_src_register & 0x03;
@@ -5474,6 +5553,442 @@ mod tests {
 
         cpu.registers.flags = NEGATIVE_FLAG;
         cpu.registers.r2 = 0x30;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.negative_flag());
+    }
+
+    #[test]
+    fn rotate_left_reg_reg_rotates_the_bits_correctly() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_rotate_left_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 3;
+        cpu.registers.r2 = 0b1101_0010;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0b1001_0110, cpu.registers.r3);
+    }
+
+    #[test]
+    fn rotate_left_handles_big_rotates_correctly() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_rotate_left_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 12; // should be 12 mod 8 == 4
+        cpu.registers.r2 = 0b1010_0101;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0b0101_1010, cpu.registers.r3);
+    }
+
+    #[test]
+    fn rotate_left_reg_reg_sets_and_unsets_zero_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_rotate_left_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+        emit_rotate_left_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = ZERO_FLAG;
+        cpu.registers.r1 = 3;
+        cpu.registers.r2 = 0b1101_0010;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.zero_flag());
+
+        cpu.registers.flags = 0;
+        cpu.registers.r1 = 3;
+        cpu.registers.r2 = 0;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.zero_flag());
+    }
+
+    #[test]
+    fn rotate_left_reg_reg_sets_and_unsets_negative_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_rotate_left_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+        emit_rotate_left_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = 0;
+        cpu.registers.r1 = 3;
+        cpu.registers.r2 = 0b0001_0010;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.negative_flag());
+
+        cpu.registers.flags = NEGATIVE_FLAG;
+        cpu.registers.r1 = 3;
+        cpu.registers.r2 = 0b1000_0000;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.negative_flag());
+    }
+
+    #[test]
+    fn rotate_left_reg_immediate_rotates_the_bits_correctly() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_rotate_left_reg_immediate(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            12);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r2 = 0b1010_0101;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0b0101_1010, cpu.registers.r3);
+    }
+
+    #[test]
+    fn rotate_left_reg_immediate_handles_big_rotates_correctly() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_rotate_left_reg_immediate(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            11);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r2 = 0b1010_0101;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0b0010_1101, cpu.registers.r3);
+    }
+
+    #[test]
+    fn rotate_left_reg_immediate_sets_and_unsets_zero_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_rotate_left_reg_immediate(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            3);
+        emit_rotate_left_reg_immediate(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            3);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = ZERO_FLAG;
+        cpu.registers.r2 = 0b1101_0010;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.zero_flag());
+
+        cpu.registers.flags = 0;
+        cpu.registers.r2 = 0;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.zero_flag());
+    }
+
+    #[test]
+    fn rotate_left_reg_immediate_sets_and_unsets_negative_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_rotate_left_reg_immediate(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            3);
+        emit_rotate_left_reg_immediate(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            3);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = 0;
+        cpu.registers.r2 = 0b0001_0010;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.negative_flag());
+
+        cpu.registers.flags = NEGATIVE_FLAG;
+        cpu.registers.r2 = 0b1000_0000;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.negative_flag());
+    }
+
+    #[test]
+    fn rotate_right_reg_reg_rotates_the_bits_correctly() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_rotate_right_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 3;
+        cpu.registers.r2 = 0b1101_0010;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0b0101_1010, cpu.registers.r3);
+    }
+
+    #[test]
+    fn rotate_right_reg_reg_handles_big_rotates_correctly() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_rotate_right_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 11; // should be 11 mod 8 == 3
+        cpu.registers.r2 = 0b1010_0101;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0b1011_0100, cpu.registers.r3);
+    }
+
+    #[test]
+    fn rotate_right_reg_reg_sets_and_unsets_zero_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_rotate_right_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+        emit_rotate_right_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = ZERO_FLAG;
+        cpu.registers.r1 = 3;
+        cpu.registers.r2 = 0b1101_0010;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.zero_flag());
+
+        cpu.registers.flags = 0;
+        cpu.registers.r1 = 3;
+        cpu.registers.r2 = 0;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.zero_flag());
+    }
+
+    #[test]
+    fn rotate_right_reg_reg_sets_and_unsets_negative_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_rotate_right_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+        emit_rotate_right_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = 0;
+        cpu.registers.r1 = 3;
+        cpu.registers.r2 = 0b0001_0110;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.negative_flag());
+
+        cpu.registers.flags = NEGATIVE_FLAG;
+        cpu.registers.r1 = 3;
+        cpu.registers.r2 = 0b1000_0010;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.negative_flag());
+    }
+
+    #[test]
+    fn rotate_right_reg_immediate_rotates_the_bits_correctly() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_rotate_right_reg_immediate(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            3);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r2 = 0b1101_0010;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0b0101_1010, cpu.registers.r3);
+    }
+
+    #[test]
+    fn rotate_right_reg_immediate_handles_big_rotates_correctly() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_rotate_right_reg_immediate(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            11);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r2 = 0b1010_0101;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0b1011_0100, cpu.registers.r3);
+    }
+
+    #[test]
+    fn rotate_right_reg_immediate_sets_and_unsets_zero_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_rotate_right_reg_immediate(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            3);
+        emit_rotate_right_reg_immediate(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            3);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = ZERO_FLAG;
+        cpu.registers.r2 = 0b1101_0010;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.zero_flag());
+
+        cpu.registers.flags = 0;
+        cpu.registers.r2 = 0;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.zero_flag());
+    }
+
+    #[test]
+    fn rotate_right_reg_immediate_sets_and_unsets_negative_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_rotate_right_reg_immediate(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            3);
+        emit_rotate_right_reg_immediate(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            3);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = 0;
+        cpu.registers.r2 = 0b0001_0110;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.negative_flag());
+
+        cpu.registers.flags = NEGATIVE_FLAG;
+        cpu.registers.r2 = 0b1000_0010;
         cpu.registers.r3 = 20;
 
         execute_instruction(&mut cpu);
