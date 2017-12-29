@@ -157,6 +157,7 @@ enum MicroOp {
     BitwiseOrImmediate,
     BitwiseXorRegister,
     BitwiseXorImmediate,
+    BitwiseNotRegister,
 }
 
 /* CPU registers. Duh. */
@@ -432,6 +433,7 @@ impl Cpu {
                 BITWISE_AND => self.decode_and(addressing),
                 BITWISE_OR => self.decode_or(addressing),
                 BITWISE_XOR => self.decode_xor(addressing),
+                BITWISE_NOT => self.decode_not(addressing),
                 /* Status flag instructions  */
                 SET_AUTO_INCREMENT_FLAG => self.decode_sai(addressing),
                 CLEAR_AUTO_INCREMENT_FLAG => self.decode_cla(addressing),
@@ -904,6 +906,7 @@ impl Cpu {
             _ =>  self.illegal_opcode(),
         }
     }
+
     fn decode_xor(&mut self, addressing: u8) {
         match addressing & 0x03 {
             REGISTER_REGISTER_ADDRESSING => {
@@ -916,6 +919,16 @@ impl Cpu {
                 self.state.micro_ops.push(MicroOp::BitwiseXorImmediate);
             },
             _ =>  self.illegal_opcode(),
+        }
+    }
+
+    fn decode_not(&mut self, addressing: u8) {
+        match addressing & 0x03 {
+            REGISTER_REGISTER_ADDRESSING => {
+                self.state.micro_ops.push(MicroOp::FetchDestSrc);
+                self.state.micro_ops.push(MicroOp::BitwiseNotRegister);
+            },
+            _ => self.illegal_opcode(),
         }
     }
 
@@ -1484,6 +1497,15 @@ impl Cpu {
 
                 self.store_register(destination, result);
             },
+            MicroOp::BitwiseNotRegister => {
+                let destination = self.state.dest_src_register & 0x03;
+                let src = (self.state.dest_src_register >> 2) & 0x03;
+
+                let srcval = self.load_register(src);
+                let result = !srcval;
+
+                self.store_register(destination, result);
+            },
         }
 
         self.state.index += 1;
@@ -2023,6 +2045,17 @@ mod tests {
             ((src_1 & 0x03) << 2));
         opcodes.push(immediate);
     }
+
+    fn emit_bitwise_not_reg_reg(
+        opcodes: &mut Vec<u8>,
+        destination: u8,
+        src: u8) {
+        opcodes.push((BITWISE_NOT) << 2 | REGISTER_REGISTER_ADDRESSING);
+        opcodes.push(
+            (destination & 0x03) |
+            ((src & 0x03) << 2));
+    }
+
 
     fn update_program(cpu: &mut Cpu, program: Vec<u8>, load_address: u16) {
         cpu.registers.pc = load_address;
@@ -6540,6 +6573,89 @@ mod tests {
 
         cpu.registers.flags = 0;
         cpu.registers.r2 = 0x8F;
+        cpu.registers.r3 = 0;
+
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.negative_flag());
+    }
+
+    #[test]
+    fn bitwise_not_inverts_bits() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_bitwise_not_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r2 = 0xAC;
+        cpu.registers.r3 = 0;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0x53, cpu.registers.r3);
+    }
+
+    #[test]
+    fn bitwise_not_sets_and_unsets_zero_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_bitwise_not_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2);
+        emit_bitwise_not_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = ZERO_FLAG;
+        cpu.registers.r2 = 0xAC;
+        cpu.registers.r3 = 0;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.zero_flag());
+
+        cpu.registers.flags = 0;
+        cpu.registers.r2 = 0xFF;
+        cpu.registers.r3 = 0;
+
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.zero_flag());
+    }
+
+
+
+    #[test]
+    fn bitwise_not_sets_and_unsets_negative_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_bitwise_not_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2);
+        emit_bitwise_not_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = NEGATIVE_FLAG;
+        cpu.registers.r2 = 0xAC;
+        cpu.registers.r3 = 0;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.negative_flag());
+
+        cpu.registers.flags = 0;
+        cpu.registers.r2 = 0x7F;
         cpu.registers.r3 = 0;
 
         execute_instruction(&mut cpu);
