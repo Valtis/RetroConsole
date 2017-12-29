@@ -145,6 +145,8 @@ enum MicroOp {
     ArithmeticShiftLeftImmediate,
     ArithmeticShiftRightRegister,
     ArithmeticShiftRightImmediate,
+    LogicalShiftRightRegister,
+    LogicalShiftRightImmediate,
     BitwiseAndRegister,
     BitwiseAndImmediate,
     BitwiseOrRegister,
@@ -420,6 +422,7 @@ impl Cpu {
                 /* Bitwise operations */
                 ARITHMETIC_SHIFT_LEFT => self.decode_asl(addressing),
                 ARITHMETIC_SHIFT_RIGHT => self.decode_asr(addressing),
+                LOGICAL_SHIFT_RIGHT => self.decode_lsr(addressing),
                 BITWISE_AND => self.decode_and(addressing),
                 BITWISE_OR => self.decode_or(addressing),
                 BITWISE_XOR => self.decode_xor(addressing),
@@ -814,6 +817,23 @@ impl Cpu {
                 self.state.micro_ops.push(MicroOp::FetchValue);
                 self.state.micro_ops.push(
                     MicroOp::ArithmeticShiftRightImmediate);
+            },
+            _ => self.illegal_opcode(),
+        }
+    }
+
+    fn decode_lsr(&mut self, addressing: u8) {
+        match addressing & 0x03 {
+            REGISTER_REGISTER_ADDRESSING => {
+                self.state.micro_ops.push(MicroOp::FetchDestSrc);
+                self.state.micro_ops.push(
+                    MicroOp::LogicalShiftRightRegister);
+            },
+            REGISTER_IMMEDIATE_ADDRESSING => {
+                self.state.micro_ops.push(MicroOp::FetchDestSrc);
+                self.state.micro_ops.push(MicroOp::FetchValue);
+                self.state.micro_ops.push(
+                    MicroOp::LogicalShiftRightImmediate);
             },
             _ => self.illegal_opcode(),
         }
@@ -1257,7 +1277,6 @@ impl Cpu {
                 self.store_register(destination, result as u8);
             },
             MicroOp::ArithmeticShiftRightRegister => {
-
                 let destination = self.state.dest_src_register & 0x03;
                 let src1 = (self.state.dest_src_register >> 2) & 0x03;
                 let src2 = (self.state.dest_src_register >> 4) & 0x03;
@@ -1280,6 +1299,39 @@ impl Cpu {
 
                 let src1val = (self.load_register(src1) as i16) << 8;
                 let src2val = self.state.value_register as i16;
+                let result = src1val >> (src2val & 0x07);
+
+                if result & 0x80 != 0 {
+                    self.registers.set_carry_flag();
+                } else {
+                    self.registers.clear_carry_flag();
+                }
+
+                self.store_register(destination, (result >> 8) as u8);
+            },
+            MicroOp::LogicalShiftRightRegister => {
+                let destination = self.state.dest_src_register & 0x03;
+                let src1 = (self.state.dest_src_register >> 2) & 0x03;
+                let src2 = (self.state.dest_src_register >> 4) & 0x03;
+
+                let src1val = (self.load_register(src1) as u16) << 8;
+                let src2val = self.load_register(src2) as u16;
+                let result = src1val >> (src2val & 0x07);
+
+                if result & 0x80 != 0 {
+                    self.registers.set_carry_flag();
+                } else {
+                    self.registers.clear_carry_flag();
+                }
+
+                self.store_register(destination, (result >> 8) as u8);
+            },
+            MicroOp::LogicalShiftRightImmediate => {
+                let destination = self.state.dest_src_register & 0x03;
+                let src1 = (self.state.dest_src_register >> 2) & 0x03;
+
+                let src1val = (self.load_register(src1) as u16) << 8;
+                let src2val = self.state.value_register as u16;
                 let result = src1val >> (src2val & 0x07);
 
                 if result & 0x80 != 0 {
@@ -4336,7 +4388,7 @@ mod tests {
         cpu.registers.r3 = 20;
 
         execute_instruction(&mut cpu);
-        assert_eq!(18 << 3, cpu.registers.r3);
+        assert_eq!(144, cpu.registers.r3);
     }
 
     #[test]
@@ -4670,7 +4722,7 @@ mod tests {
         cpu.registers.r3 = 20;
 
         execute_instruction(&mut cpu);
-        assert_eq!(((0xF4 as i8) >> 3) as u8, cpu.registers.r3);
+        assert_eq!(0xFE, cpu.registers.r3);
     }
 
     #[test]
@@ -4875,7 +4927,7 @@ mod tests {
         cpu.registers.r3 = 20;
 
         execute_instruction(&mut cpu);
-        assert_eq!(((0xF4 as i8) >> 3) as u8, cpu.registers.r3);
+        assert_eq!(0xFE, cpu.registers.r3);
     }
 
     #[test]
@@ -5049,6 +5101,383 @@ mod tests {
 
         execute_instruction(&mut cpu);
         assert!(cpu.registers.negative_flag());
+    }
+
+
+    #[test]
+    fn logical_shift_right_reg_reg_stores_correct_value_in_dst_reg() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_logical_shift_right_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 3;
+        cpu.registers.r2 = 0xF4;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0x1E, cpu.registers.r3);
+    }
+
+    #[test]
+    fn logical_shift_right_reg_reg_large_shift_wraps_around() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_logical_shift_right_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 16;
+        cpu.registers.r2 = 18;
+        cpu.registers.r3 = 20;
+
+        // shift amount mod 8: 16 mod 8 = 0
+        execute_instruction(&mut cpu);
+        assert_eq!(18, cpu.registers.r3);
+    }
+
+    #[test]
+    fn logical_shift_right_reg_reg_zero_fills_from_left() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_logical_shift_right_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+        emit_logical_shift_right_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 2;
+        cpu.registers.r2 = 0xAF;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0x2B, cpu.registers.r3);
+
+        cpu.registers.r1 = 2;
+        cpu.registers.r2 = 0x7F;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0x1F, cpu.registers.r3);
+    }
+
+    #[test]
+    fn logical_shift_right_reg_reg_sets_and_unsets_carry_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_logical_shift_right_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+        emit_logical_shift_right_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+        emit_logical_shift_right_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+        emit_logical_shift_right_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = 0;
+        cpu.registers.r1 = 1;
+        cpu.registers.r2 = 0x01;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.carry_flag());
+
+        cpu.registers.flags = CARRY_FLAG;
+        cpu.registers.r1 = 1;
+        cpu.registers.r2 = 0x74;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.carry_flag());
+
+        cpu.registers.flags = CARRY_FLAG;
+        cpu.registers.r1 = 24; // effectively 0 due to modulo
+        cpu.registers.r2 = 0xFF;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.carry_flag());
+
+        cpu.registers.flags = CARRY_FLAG;
+        cpu.registers.r1 = 7;
+        cpu.registers.r2 = 0x40;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.carry_flag());
+    }
+
+    #[test]
+    fn logical_shift_right_reg_reg_sets_and_unsets_zero_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_logical_shift_right_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+        emit_logical_shift_right_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = 0;
+        cpu.registers.r1 = 1;
+        cpu.registers.r2 = 0x01;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.zero_flag());
+
+        cpu.registers.flags = ZERO_FLAG;
+        cpu.registers.r1 = 1;
+        cpu.registers.r2 = 0x7F;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.zero_flag());
+    }
+
+    #[test]
+    fn logical_shift_right_reg_reg_unsets_negative_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_logical_shift_right_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = NEGATIVE_FLAG;
+        cpu.registers.r1 = 1;
+        cpu.registers.r2 = 0x30;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.negative_flag());
+    }
+
+    #[test]
+    fn logical_shift_right_reg_immediate_stores_correct_value_in_dst_reg() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_logical_shift_right_reg_immediate(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            3);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r2 = 0xF4;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0x1E, cpu.registers.r3);
+    }
+
+    #[test]
+    fn logical_shift_right_reg_immediate_large_shift_wraps_around() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_logical_shift_right_reg_immediate(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            32);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r2 = 18;
+        cpu.registers.r3 = 20;
+
+        // shift amount mod 8: 8 mod 8 = 0
+        execute_instruction(&mut cpu);
+        assert_eq!(18, cpu.registers.r3);
+    }
+
+    #[test]
+    fn logical_shift_right_reg_immediate_zero_fills_from_left() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_logical_shift_right_reg_immediate(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            2);
+        emit_logical_shift_right_reg_immediate(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            2);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r2 = 0xAF;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0x2B, cpu.registers.r3);
+
+        cpu.registers.r2 = 0x7F;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0x1F, cpu.registers.r3);
+    }
+
+    #[test]
+    fn logical_shift_right_reg_immediate_sets_and_unsets_carry_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_logical_shift_right_reg_immediate(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            1);
+        emit_logical_shift_right_reg_immediate(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            1);
+        emit_logical_shift_right_reg_immediate(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            8);
+        emit_logical_shift_right_reg_immediate(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            7);
+
+       update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = 0;
+        cpu.registers.r2 = 0x01;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.carry_flag());
+
+        cpu.registers.flags = CARRY_FLAG;
+        cpu.registers.r2 = 0x74;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.carry_flag());
+
+        cpu.registers.flags = CARRY_FLAG;
+        cpu.registers.r2 = 0xFF;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.carry_flag());
+
+        cpu.registers.flags = CARRY_FLAG;
+        cpu.registers.r2 = 0x40;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.carry_flag());
+    }
+
+    #[test]
+    fn logical_shift_right_reg_immediate_sets_and_unsets_zero_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_logical_shift_right_reg_immediate(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            1);
+        emit_logical_shift_right_reg_immediate(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            1);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = 0;
+        cpu.registers.r2 = 0x01;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.zero_flag());
+
+        cpu.registers.flags = ZERO_FLAG;
+        cpu.registers.r2 = 0x7F;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.zero_flag());
+    }
+
+    #[test]
+    fn logical_shift_right_reg_immediate_unsets_negative_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_logical_shift_right_reg_immediate(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R2,
+            1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = NEGATIVE_FLAG;
+        cpu.registers.r2 = 0x30;
+        cpu.registers.r3 = 20;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.negative_flag());
     }
 
     #[test]
