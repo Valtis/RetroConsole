@@ -48,6 +48,9 @@ const STORE_REGISTER: u8 = 0x11;
 const ADD_WITH_CARRY: u8 = 0x30;
 const ADD_WITHOUT_CARRY: u8 = 0x31;
 
+const SUBTRACT_WITH_BORROW: u8 = 0x32;
+const SUBTRACT_WITHOUT_BORROW: u8 = 0x33;
+
 const SIGNED_MULTIPLY: u8 = 0x34;
 const UNSIGNED_MULTIPLY: u8 = 0x35;
 
@@ -117,6 +120,8 @@ enum MicroOp {
     AddWithCarryImmediate,
     AddWithoutCarryRegister,
     AddWithoutCarryImmediate,
+    SubtractWithBorrowRegister,
+    SubtractWithoutBorrowRegister,
     BeginMultiply,
     SignedMultiplyInvertNegativeMultiplier,
     SignedMultiplyInvertNegativeMultiplicand,
@@ -420,6 +425,8 @@ impl Cpu {
                 /* Arithmetic instructions */
                 ADD_WITH_CARRY => self.decode_adc(addressing),
                 ADD_WITHOUT_CARRY => self.decode_add(addressing),
+                SUBTRACT_WITH_BORROW => self.decode_sbb(addressing),
+                SUBTRACT_WITHOUT_BORROW => self.decode_sub(addressing),
                 SIGNED_MULTIPLY => self.decode_imul(addressing),
                 UNSIGNED_MULTIPLY => self.decode_mul(addressing),
                 SIGNED_DIVIDE => self.decode_idiv(addressing),
@@ -546,6 +553,34 @@ impl Cpu {
                 self.state.micro_ops.push(MicroOp::FetchDestSrc);
                 self.state.micro_ops.push(MicroOp::FetchValue);
                 self.state.micro_ops.push(MicroOp::AddWithoutCarryImmediate);
+            },
+            _ => self.illegal_opcode(),
+        }
+    }
+
+    fn decode_sbb(&mut self, addressing: u8) {
+        match addressing & 0x03 {
+            REGISTER_REGISTER_ADDRESSING => {
+                self.state.micro_ops.push(MicroOp::FetchDestSrc);
+                self.state.micro_ops.push(
+                    MicroOp::SubtractWithBorrowRegister);
+            },
+            REGISTER_IMMEDIATE_ADDRESSING => {
+                unimplemented!();
+            },
+            _ => self.illegal_opcode(),
+        }
+    }
+
+    fn decode_sub(&mut self, addressing: u8) {
+        match addressing & 0x03 {
+            REGISTER_REGISTER_ADDRESSING => {
+                self.state.micro_ops.push(MicroOp::FetchDestSrc);
+                self.state.micro_ops.push(
+                    MicroOp::SubtractWithoutBorrowRegister);
+            },
+            REGISTER_IMMEDIATE_ADDRESSING => {
+                unimplemented!();
             },
             _ => self.illegal_opcode(),
         }
@@ -1107,7 +1142,6 @@ impl Cpu {
 
                 self.registers.set_carry_flag_on_value(result);
                 self.registers.set_overflow_flag_on_value(src1val, src2val, result);
-
                 self.store_register(destination, result as u8);
             },
             MicroOp::AddWithoutCarryImmediate => {
@@ -1122,6 +1156,53 @@ impl Cpu {
                 self.registers.set_overflow_flag_on_value(
                     src1val, src2val, result);
 
+                self.store_register(destination, result as u8);
+            },
+            MicroOp::SubtractWithBorrowRegister => {
+                let destination = self.state.dest_src_register & 0x03;
+                let src1 = (self.state.dest_src_register >> 2) & 0x03;
+                let src2 = (self.state.dest_src_register >> 4) & 0x03;
+
+                let src1val = self.load_register(src1);
+                let src2val = self.load_register(src2).wrapping_neg();
+
+                let borrow = if self.registers.carry_flag() {
+                    1
+                } else {
+                    0
+                };
+
+                let result = src1val as u16 + src2val as u16 - borrow;
+                if src1val < src2val.wrapping_neg() {
+                    self.registers.set_carry_flag();
+                } else {
+                    self.registers.clear_carry_flag();
+                }
+
+                self.registers.set_overflow_flag_on_value(src1val, src2val, result);
+
+                self.store_register(destination, result as u8);
+                self.store_register(destination, result as u8);
+            },
+            MicroOp::SubtractWithoutBorrowRegister => {
+                let destination = self.state.dest_src_register & 0x03;
+                let src1 = (self.state.dest_src_register >> 2) & 0x03;
+                let src2 = (self.state.dest_src_register >> 4) & 0x03;
+
+                let src1val = self.load_register(src1);
+                let src2val = self.load_register(src2).wrapping_neg();
+
+                let result = src1val as u16 + src2val as u16;
+
+                if src1val < src2val.wrapping_neg() {
+                    self.registers.set_carry_flag();
+                } else {
+                    self.registers.clear_carry_flag();
+                }
+
+                self.registers.set_overflow_flag_on_value(src1val, src2val, result);
+
+                self.store_register(destination, result as u8);
                 self.store_register(destination, result as u8);
             },
             MicroOp::BeginMultiply => {
@@ -1732,6 +1813,36 @@ mod tests {
             (destination & 0x03) |
             ((src_1 & 0x03) << 2));
         opcodes.push(immediate);
+    }
+
+
+    fn emit_subtract_with_borrow_reg_reg(
+        opcodes: &mut Vec<u8>,
+        destination: u8,
+        src_1: u8,
+        src_2: u8) {
+        opcodes.push(
+            (SUBTRACT_WITH_BORROW << 2)
+            | REGISTER_REGISTER_ADDRESSING);
+        opcodes.push(
+            (destination & 0x03) |
+            ((src_1 & 0x03) << 2) |
+            ((src_2 & 0x03) << 4));
+    }
+
+    fn emit_subtract_without_borrow_reg_reg(
+        opcodes: &mut Vec<u8>,
+        destination: u8,
+        src_1: u8,
+        src_2: u8) {
+        opcodes.push(
+            (SUBTRACT_WITHOUT_BORROW << 2)
+            | REGISTER_REGISTER_ADDRESSING);
+        opcodes.push(
+            (destination & 0x03) |
+            ((src_1 & 0x03) << 2) |
+            ((src_2 & 0x03) << 4));
+
     }
 
     fn emit_unsigned_multiply_reg_reg(
@@ -3417,6 +3528,516 @@ mod tests {
         cpu.registers.flags = 0;
         execute_instruction(&mut cpu);
         assert!(cpu.registers.overflow_flag());
+    }
+
+    #[test]
+    fn multi_byte_addition_works() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+        emit_add_without_carry_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R3,
+            ENCODING_R1);
+        emit_add_with_carry_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R4,
+            ENCODING_R2);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        // R4:R3 = 0x2090 = 8336    R2:R1 = 0x15F0 = 5616
+        // R4:R3 + R2:R1
+        // expected: R4:R3 = 0x3680 = 13952
+
+        cpu.registers.flags = 0;
+        cpu.registers.r1 = 0xF0;
+        cpu.registers.r2 = 0x15;
+        cpu.registers.r3 = 0x90;
+        cpu.registers.r4 = 0x20;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0xF0, cpu.registers.r1);
+        assert_eq!(0x15, cpu.registers.r2);
+        assert_eq!(0x80, cpu.registers.r3);
+        assert_eq!(0x20, cpu.registers.r4);
+        assert!(cpu.registers.carry_flag());
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0xF0, cpu.registers.r1);
+        assert_eq!(0x15, cpu.registers.r2);
+        assert_eq!(0x80, cpu.registers.r3);
+        assert_eq!(0x36, cpu.registers.r4);
+        assert!(!cpu.registers.carry_flag());
+    }
+
+    #[test]
+    fn subtract_without_borrow_reg_reg_computes_correct_value_when_carry_unset() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+        emit_subtract_without_borrow_reg_reg(
+            &mut program,
+            ENCODING_R1,
+            ENCODING_R2,
+            ENCODING_R3);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 0x40;
+        cpu.registers.r2 = 10;
+        cpu.registers.r3 = 2;
+        cpu.registers.flags = 0;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(8, cpu.registers.r1);
+    }
+
+    #[test]
+    fn subtract_without_borrow_reg_reg_computes_correct_value_when_carry_set() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+        emit_subtract_without_borrow_reg_reg(
+            &mut program,
+            ENCODING_R1,
+            ENCODING_R2,
+            ENCODING_R3);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 0x40;
+        cpu.registers.r2 = 20;
+        cpu.registers.r3 = 40;
+        cpu.registers.flags = CARRY_FLAG;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(20u8.wrapping_neg(), cpu.registers.r1);
+    }
+
+    #[test]
+    fn subtract_without_borrow_reg_reg_result_overflows_correctly() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+        emit_subtract_without_borrow_reg_reg(
+            &mut program,
+            ENCODING_R1,
+            ENCODING_R2,
+            ENCODING_R3);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 0x49;
+        cpu.registers.r2 = 2u8.wrapping_neg();
+        cpu.registers.r3 = 128u8.wrapping_neg();
+        cpu.registers.flags = 0;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(126, cpu.registers.r1);
+    }
+
+    #[test]
+    fn subtract_without_borrow_reg_reg_sets_and_clears_zero_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+        emit_subtract_without_borrow_reg_reg(
+            &mut program,
+            ENCODING_R1,
+            ENCODING_R2,
+            ENCODING_R3);
+        emit_subtract_without_borrow_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 0x40;
+        cpu.registers.r2 = 0x05;
+        cpu.registers.r3 = 0x02;
+        cpu.registers.flags = ZERO_FLAG;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.zero_flag());
+
+        cpu.registers.r4 = 0x0;
+        cpu.registers.r3 = 0x8;
+        cpu.registers.r2 = 0x8;
+
+        cpu.registers.flags = 0;
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.zero_flag());
+    }
+
+    #[test]
+    fn subtract_without_borrow_reg_reg_sets_and_clears_negative_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+        emit_subtract_without_borrow_reg_reg(
+            &mut program,
+            ENCODING_R1,
+            ENCODING_R2,
+            ENCODING_R3);
+        emit_subtract_without_borrow_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 0x40;
+        cpu.registers.r2 = 0x05;
+        cpu.registers.r3 = 0x02;
+        cpu.registers.flags = NEGATIVE_FLAG;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.negative_flag());
+
+        cpu.registers.r4 = 0x0;
+        cpu.registers.r3 = 0x20;
+        cpu.registers.r2 = 0x60;
+
+        cpu.registers.flags = 0;
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.negative_flag());
+    }
+
+    #[test]
+    fn subtract_without_borrow_reg_reg_sets_and_clears_carry_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+        emit_subtract_without_borrow_reg_reg(
+            &mut program,
+            ENCODING_R1,
+            ENCODING_R2,
+            ENCODING_R3);
+        emit_subtract_without_borrow_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 0x40;
+        cpu.registers.r2 = 20;
+        cpu.registers.r3 = 20;
+        cpu.registers.flags = CARRY_FLAG;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.carry_flag());
+
+        cpu.registers.r4 = 0x0;
+        cpu.registers.r3 = 20;
+        cpu.registers.r2 = 21;
+
+        cpu.registers.flags = 0;
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.carry_flag());
+    }
+
+    #[test]
+    fn subtract_without_borrow_reg_reg_sets_and_clears_overflow_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+        // clear flag
+        emit_subtract_without_borrow_reg_reg(
+            &mut program,
+            ENCODING_R1,
+            ENCODING_R2,
+            ENCODING_R3);
+        //
+        emit_subtract_without_borrow_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2);
+        // overflow set when both values < 127
+        emit_subtract_without_borrow_reg_reg(
+            &mut program,
+            ENCODING_R2,
+            ENCODING_R3,
+            ENCODING_R4);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 0x0;
+        cpu.registers.r2 = 2u8.wrapping_neg();
+        cpu.registers.r3 = 1u8.wrapping_neg();
+        cpu.registers.flags = OVERFLOW_FLAG;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.overflow_flag());
+
+        cpu.registers.r4 = 0x0;
+        cpu.registers.r3 = 2u8.wrapping_neg();
+        cpu.registers.r2 = 127;
+
+        cpu.registers.flags = 0;
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.overflow_flag());
+
+
+        cpu.registers.r2 = 0x0;
+        cpu.registers.r3 = 127;
+        cpu.registers.r4 = 1u8.wrapping_neg();
+
+        cpu.registers.flags = 0;
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.overflow_flag());
+    }
+
+    #[test]
+    fn subtract_with_borrow_reg_reg_computes_correct_value_when_carry_unset() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+        emit_subtract_with_borrow_reg_reg(
+            &mut program,
+            ENCODING_R1,
+            ENCODING_R2,
+            ENCODING_R3);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 0x40;
+        cpu.registers.r2 = 10;
+        cpu.registers.r3 = 2;
+        cpu.registers.flags = 0;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(8, cpu.registers.r1);
+    }
+
+    #[test]
+    fn subtract_with_borrow_reg_reg_computes_correct_value_when_carry_set() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+        emit_subtract_with_borrow_reg_reg(
+            &mut program,
+            ENCODING_R1,
+            ENCODING_R2,
+            ENCODING_R3);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 0x40;
+        cpu.registers.r2 = 20;
+        cpu.registers.r3 = 40;
+        cpu.registers.flags = CARRY_FLAG;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(21u8.wrapping_neg(), cpu.registers.r1);
+    }
+
+    #[test]
+    fn subtract_with_borrow_reg_reg_result_overflows_correctly() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+        emit_subtract_with_borrow_reg_reg(
+            &mut program,
+            ENCODING_R1,
+            ENCODING_R2,
+            ENCODING_R3);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 0x49;
+        cpu.registers.r2 = 2u8.wrapping_neg();
+        cpu.registers.r3 = 128u8.wrapping_neg();
+        cpu.registers.flags = 0;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(126, cpu.registers.r1);
+    }
+
+    #[test]
+    fn subtract_with_borrow_reg_reg_sets_and_clears_zero_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+        emit_subtract_with_borrow_reg_reg(
+            &mut program,
+            ENCODING_R1,
+            ENCODING_R2,
+            ENCODING_R3);
+        emit_subtract_with_borrow_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 0x40;
+        cpu.registers.r2 = 0x05;
+        cpu.registers.r3 = 0x02;
+        cpu.registers.flags = ZERO_FLAG;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.zero_flag());
+
+        cpu.registers.r4 = 0x0;
+        cpu.registers.r3 = 0x8;
+        cpu.registers.r2 = 0x8;
+
+        cpu.registers.flags = 0;
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.zero_flag());
+    }
+
+    #[test]
+    fn subtract_with_borrow_reg_reg_sets_and_clears_negative_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+        emit_subtract_with_borrow_reg_reg(
+            &mut program,
+            ENCODING_R1,
+            ENCODING_R2,
+            ENCODING_R3);
+        emit_subtract_with_borrow_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 0x40;
+        cpu.registers.r2 = 0x05;
+        cpu.registers.r3 = 0x02;
+        cpu.registers.flags = NEGATIVE_FLAG;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.negative_flag());
+
+        cpu.registers.r4 = 0x0;
+        cpu.registers.r3 = 0x20;
+        cpu.registers.r2 = 0x60;
+
+        cpu.registers.flags = 0;
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.negative_flag());
+    }
+
+    #[test]
+    fn subtract_with_borrow_reg_reg_sets_and_clears_carry_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+        emit_subtract_with_borrow_reg_reg(
+            &mut program,
+            ENCODING_R1,
+            ENCODING_R2,
+            ENCODING_R3);
+        emit_subtract_with_borrow_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 0x40;
+        cpu.registers.r2 = 20;
+        cpu.registers.r3 = 20;
+        cpu.registers.flags = CARRY_FLAG;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.carry_flag());
+
+        cpu.registers.r4 = 0x0;
+        cpu.registers.r3 = 20;
+        cpu.registers.r2 = 21;
+
+        cpu.registers.flags = 0;
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.carry_flag());
+    }
+
+    #[test]
+    fn subtract_with_borrow_reg_reg_sets_and_clears_overflow_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+        // clear flag
+        emit_subtract_with_borrow_reg_reg(
+            &mut program,
+            ENCODING_R1,
+            ENCODING_R2,
+            ENCODING_R3);
+        //
+        emit_subtract_with_borrow_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R3,
+            ENCODING_R2);
+        // overflow set when both values < 127
+        emit_subtract_with_borrow_reg_reg(
+            &mut program,
+            ENCODING_R2,
+            ENCODING_R3,
+            ENCODING_R4);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 0x0;
+        cpu.registers.r2 = 2u8.wrapping_neg();
+        cpu.registers.r3 = 1u8.wrapping_neg();
+        cpu.registers.flags = OVERFLOW_FLAG;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.overflow_flag());
+
+        cpu.registers.r4 = 0x0;
+        cpu.registers.r3 = 2u8.wrapping_neg();
+        cpu.registers.r2 = 127;
+
+        cpu.registers.flags = 0;
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.overflow_flag());
+
+
+        cpu.registers.r2 = 0x0;
+        cpu.registers.r3 = 127;
+        cpu.registers.r4 = 1u8.wrapping_neg();
+
+        cpu.registers.flags = 0;
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.overflow_flag());
+    }
+
+    #[test]
+    fn multi_byte_subtraction_works() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+        emit_subtract_without_borrow_reg_reg(
+            &mut program,
+            ENCODING_R3,
+            ENCODING_R3,
+            ENCODING_R1);
+        emit_subtract_with_borrow_reg_reg(
+            &mut program,
+            ENCODING_R4,
+            ENCODING_R4,
+            ENCODING_R2);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        // R4:R3 = 0x2090 = 8336    R2:R1 = 0x15F0 = 5616
+        // R4:R3 - R2:R1
+        // expected: R4:R3 = 0x0AA0 = 2720
+
+        cpu.registers.flags = 0;
+        cpu.registers.r1 = 0xF0;
+        cpu.registers.r2 = 0x15;
+        cpu.registers.r3 = 0x90;
+        cpu.registers.r4 = 0x20;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0xF0, cpu.registers.r1);
+        assert_eq!(0x15, cpu.registers.r2);
+        assert_eq!(0xA0, cpu.registers.r3);
+        assert_eq!(0x20, cpu.registers.r4);
+        assert!(cpu.registers.carry_flag());
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0xF0, cpu.registers.r1);
+        assert_eq!(0x15, cpu.registers.r2);
+        assert_eq!(0xA0, cpu.registers.r3);
+        assert_eq!(0x0A, cpu.registers.r4);
+        assert!(!cpu.registers.carry_flag());
     }
 
     #[test]
