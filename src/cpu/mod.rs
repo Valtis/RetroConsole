@@ -67,7 +67,7 @@ const ARITHMETIC_SHIFT_LEFT: u8 = 0x24;
 const ARITHMETIC_SHIFT_RIGHT: u8 = 0x25;
 
 const LOGICAL_SHIFT_RIGHT: u8 = 0x26;
-// logical shift right === arithmetic shift right
+// logical shift left === arithmetic shift left
 
 const ROTATE_LEFT: u8 = 0x27;
 const ROTATE_RIGHT: u8 = 0x28;
@@ -75,6 +75,8 @@ const ROTATE_RIGHT: u8 = 0x28;
 /* Flag instructions */
 const SET_AUTO_INCREMENT_FLAG: u8 = 0x07;
 const CLEAR_AUTO_INCREMENT_FLAG: u8 = 0x06;
+const SET_INTERRUPT_ENABLE_FLAG: u8 = 0x03;
+const CLEAR_INTERRUPT_ENABLE_FLAG: u8 = 0x02;
 
 /* Initial value of the stack pointer */
 const SP_INITIAL_VALUE: u16 = 0x200;
@@ -97,6 +99,7 @@ enum MicroOp {
     Nop,
     SetAutoIncrementFlag,
     ClearAutoIncrementFlag,
+    SetInterruptFlag,
     ClearInterruptFlag,
     SetFaultFlag,
     FetchValue,
@@ -237,6 +240,10 @@ impl Registers {
 
     fn overflow_flag(&self) -> bool {
         self.flags & OVERFLOW_FLAG != 0
+    }
+
+    fn interrupt_flag(&self) -> bool {
+        self.flags & INTERRUPT_ENABLE_FLAG != 0
     }
 
     fn auto_increment_flag(&self) -> bool {
@@ -444,6 +451,8 @@ impl Cpu {
                 /* Status flag instructions  */
                 SET_AUTO_INCREMENT_FLAG => self.decode_sai(addressing),
                 CLEAR_AUTO_INCREMENT_FLAG => self.decode_cla(addressing),
+                SET_INTERRUPT_ENABLE_FLAG => self.decode_sei(addressing),
+                CLEAR_INTERRUPT_ENABLE_FLAG => self.decode_cli(addressing),
                 _ => self.illegal_opcode(),
             }
         } else {
@@ -983,6 +992,22 @@ impl Cpu {
         }
     }
 
+    fn decode_cli(&mut self, addressing: u8) {
+        match addressing & 0x03 {
+            IMPLICIT_ADDRESSING =>
+                self.state.micro_ops.push(MicroOp::ClearInterruptFlag),
+            _ =>  self.illegal_opcode(),
+        }
+    }
+
+    fn decode_sei(&mut self, addressing: u8) {
+        match addressing & 0x03 {
+            IMPLICIT_ADDRESSING =>
+                self.state.micro_ops.push(MicroOp::SetInterruptFlag),
+            _ =>  self.illegal_opcode(),
+        }
+    }
+
     fn execute_micro_op(&mut self) {
 
         let current_op = self.state.micro_ops[self.state.index];
@@ -995,6 +1020,9 @@ impl Cpu {
             },
             MicroOp::ClearAutoIncrementFlag => {
                 self.registers.clear_autoincrement_flag();
+            },
+            MicroOp::SetInterruptFlag => {
+                self.registers.set_interrupt_flag();
             },
             MicroOp::ClearInterruptFlag => {
                 self.registers.clear_interrupt_flag();
@@ -1689,6 +1717,14 @@ mod tests {
         opcodes.push(CLEAR_AUTO_INCREMENT_FLAG << 2);
     }
 
+    fn emit_set_interrupt_enable(opcodes: &mut Vec<u8>) {
+        opcodes.push(SET_INTERRUPT_ENABLE_FLAG << 2);
+    }
+
+    fn emit_clear_interrupt_enable(opcodes: &mut Vec<u8>) {
+        opcodes.push(CLEAR_INTERRUPT_ENABLE_FLAG << 2);
+    }
+
     fn emit_load_immediate(
         opcodes: &mut Vec<u8>,
         destination: u8,
@@ -2206,6 +2242,32 @@ mod tests {
         execute_instruction(&mut cpu);
 
         assert!(!cpu.registers.auto_increment_flag());
+    }
+
+    #[test]
+    fn set_interrupt_flag_sets_the_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+        emit_set_interrupt_enable(&mut program);
+        update_program(&mut cpu, program, 0x1000);
+
+        cpu.registers.flags = 0;
+        execute_instruction(&mut cpu);
+
+        assert!(cpu.registers.interrupt_flag());
+    }
+
+    #[test]
+    fn clear_interrupt_flag_clears_the_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+        emit_clear_interrupt_enable(&mut program);
+        update_program(&mut cpu, program, 0x1000);
+
+        cpu.registers.flags = INTERRUPT_ENABLE_FLAG;
+        execute_instruction(&mut cpu);
+
+        assert!(!cpu.registers.interrupt_flag());
     }
 
     #[test]
