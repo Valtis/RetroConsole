@@ -1,17 +1,20 @@
+mod register;
 
 use memory_controller::MemoryController;
 use std::rc::Rc;
 use std::cell::RefCell;
+use self::register::Registers;
+use self::register::{
+    ZERO_FLAG,
+    NEGATIVE_FLAG,
+    CARRY_FLAG,
+    OVERFLOW_FLAG,
+    INTERRUPT_ENABLE_FLAG,
+    BREAK_FLAG,
+    AUTO_INCREMENT_FLAG,
+    FAULT_FLAG};
 
-/* CPU flags */
-const ZERO_FLAG: u8 = 0x01;
-const NEGATIVE_FLAG: u8 = 0x02;
-const CARRY_FLAG: u8 = 0x04;
-const OVERFLOW_FLAG: u8 = 0x08;
-const INTERRUPT_ENABLE_FLAG: u8 = 0x10;
-const BREAK_FLAG: u8  = 0x20;
-const AUTO_INCREMENT_FLAG: u8 = 0x40;
-const FAULT_FLAG: u8 = 0x80;
+
 
 /* Register encodings */
 const ENCODING_R1:u8 = 0x00;
@@ -29,15 +32,28 @@ const INDIRECT_ADDRESSING: u8 = 0x03;
 const REGISTER_REGISTER_ADDRESSING: u8 = 0x00;
 const REGISTER_IMMEDIATE_ADDRESSING: u8 = 0x01;
 
+
+
 /* Set/Clear flag addressing mode */
 const IMPLICIT_ADDRESSING: u8 = 0x00;
-
+/* Conditional branching instructions */
+const RELATIVE_ADDRESSING: u8 = 0x00;
 /*
     Opcodes. Note that only 6 bits are reserved for opcodes in the instruction
     encoding, so largest possible value fo opcode is 0x3F. This also means
     there are only 64 possible instructions, with 4 possible addressing modes
     for each
 */
+
+
+/* CPU flag instructions */
+const SET_AUTO_INCREMENT_FLAG: u8 = 0x07;
+const CLEAR_AUTO_INCREMENT_FLAG: u8 = 0x06;
+const SET_CARRY_FLAG: u8 = 0x05;
+const CLEAR_CARRY_FLAG: u8 = 0x04;
+const SET_INTERRUPT_ENABLE_FLAG: u8 = 0x03;
+const CLEAR_INTERRUPT_ENABLE_FLAG: u8 = 0x02;
+
 
 /* Data movement instructions  */
 const LOAD_REGISTER: u8 = 0x10;
@@ -72,14 +88,11 @@ const LOGICAL_SHIFT_RIGHT: u8 = 0x26;
 const ROTATE_LEFT: u8 = 0x27;
 const ROTATE_RIGHT: u8 = 0x28;
 
-/* Flag instructions */
-const SET_AUTO_INCREMENT_FLAG: u8 = 0x07;
-const CLEAR_AUTO_INCREMENT_FLAG: u8 = 0x06;
-const SET_INTERRUPT_ENABLE_FLAG: u8 = 0x03;
-const CLEAR_INTERRUPT_ENABLE_FLAG: u8 = 0x02;
+const TEST_BIT_PATTERN: u8 = 0x29;
 
-/* Initial value of the stack pointer */
-const SP_INITIAL_VALUE: u16 = 0x200;
+/* Branching instructions */
+const BRANCH_ON_CARRY_CLEAR: u8 = 0x38;
+
 
 
 /* Interrupt vector table address locations */
@@ -99,6 +112,8 @@ enum MicroOp {
     Nop,
     SetAutoIncrementFlag,
     ClearAutoIncrementFlag,
+    SetCarryFlag,
+    ClearCarryFlag,
     SetInterruptFlag,
     ClearInterruptFlag,
     SetFaultFlag,
@@ -161,24 +176,16 @@ enum MicroOp {
     RotateRightImmediate,
     BitwiseAndRegister,
     BitwiseAndImmediate,
+    TestBitPatternRegister,
+    TestBitPatternImmediate,
     BitwiseOrRegister,
     BitwiseOrImmediate,
     BitwiseXorRegister,
     BitwiseXorImmediate,
     BitwiseNotRegister,
+    BranchIfCarryClear,
 }
 
-/* CPU registers. Duh. */
- #[derive(Debug)]
- struct Registers {
-    r1: u8,
-    r2: u8,
-    r3: u8,
-    r4: u8,
-    pc: u16,
-    sp: u16,
-    flags: u8,
-}
 
 /* Used to store various pieces of data required by the CPU state machine */
 struct StateMachine {
@@ -210,144 +217,6 @@ impl StateMachine {
             negate_remainder: false,
             negate_quotinent: false,
         }
-    }
-}
-
-impl Registers {
-    fn new() -> Registers {
-        Registers {
-            r1: 0,
-            r2: 0,
-            r3: 0,
-            r4: 0,
-            pc: 0,
-            sp: SP_INITIAL_VALUE,
-            flags: INTERRUPT_ENABLE_FLAG,
-        }
-    }
-
-    fn zero_flag(&self) -> bool {
-        self.flags & ZERO_FLAG != 0
-    }
-
-    fn negative_flag(&self) -> bool {
-        self.flags & NEGATIVE_FLAG != 0
-    }
-
-    fn carry_flag(&self) -> bool {
-        self.flags & CARRY_FLAG != 0
-    }
-
-    fn overflow_flag(&self) -> bool {
-        self.flags & OVERFLOW_FLAG != 0
-    }
-
-    fn interrupt_flag(&self) -> bool {
-        self.flags & INTERRUPT_ENABLE_FLAG != 0
-    }
-
-    fn auto_increment_flag(&self) -> bool {
-        self.flags & AUTO_INCREMENT_FLAG != 0
-    }
-
-    fn fault_flag(&self) -> bool {
-        self.flags & FAULT_FLAG != 0
-    }
-
-    fn set_zero_negative_flags(&mut self, value: u8) {
-        self.set_zero_flag_on_value(value);
-        self.set_negative_flag_on_value(value);
-    }
-
-    fn set_zero_flag_on_value(&mut self, value: u8) {
-        if value == 0 {
-            self.set_zero_flag();
-        } else {
-            self.clear_zero_flag();
-        }
-    }
-
-    fn set_zero_flag(&mut self) {
-        self.flags |= ZERO_FLAG;
-    }
-
-    fn clear_zero_flag(&mut self) {
-        self.flags &= !ZERO_FLAG;
-    }
-
-    fn set_negative_flag_on_value(&mut self, value: u8) {
-        if value > 127 {
-            self.flags |= NEGATIVE_FLAG;
-        } else {
-            self.flags &= !NEGATIVE_FLAG;
-        }
-    }
-
-    fn set_carry_flag_on_value(&mut self, result: u16) {
-        if result > 255 {
-            self.set_carry_flag();
-        } else {
-            self.clear_carry_flag();
-        }
-    }
-
-    fn set_carry_flag(&mut self) {
-        self.flags |= CARRY_FLAG;
-    }
-
-    fn clear_carry_flag(&mut self) {
-        self.flags &= !CARRY_FLAG;
-    }
-
-    /*
-        overflow happens if both src values have same sign (8th bit set/unset in
-        both), and the sign bit in in the result is different --> operation
-        on two positive values resulted in negative number, or other way around
-    */
-    fn set_overflow_flag_on_value(
-        &mut self,
-        src1: u8,
-        src2: u8,
-        result: u16) {
-        let same_sign = (0x80 & src1) == (0x80 & src2);
-        let src_dst_differs = (0x80 & src1) != (0x80 & result) as u8;
-        if same_sign && src_dst_differs {
-            self.set_overflow_flag();
-        } else {
-            self.clear_overflow_flag();
-        }
-    }
-
-    fn set_overflow_flag(&mut self) {
-        self.flags |= OVERFLOW_FLAG;
-    }
-
-    fn clear_overflow_flag(&mut self) {
-        self.flags &= !OVERFLOW_FLAG;
-    }
-
-    fn set_interrupt_flag(&mut self) {
-        self.flags |= INTERRUPT_ENABLE_FLAG;
-    }
-
-    fn clear_interrupt_flag(&mut self) {
-        self.flags &= !INTERRUPT_ENABLE_FLAG;
-    }
-
-    fn set_auto_increment_flag(&mut self) {
-        self.flags |= AUTO_INCREMENT_FLAG;
-    }
-
-    fn clear_autoincrement_flag(&mut self) {
-        self.flags &= !AUTO_INCREMENT_FLAG;
-    }
-
-    fn set_fault_flag(&mut self) {
-        self.flags |= FAULT_FLAG;
-    }
-
-    fn clear_fault_flag(&mut self) {
-        self.flags &= !FAULT_FLAG;
     }
 }
 
@@ -425,6 +294,7 @@ impl Cpu {
 
             let opcode = value >> 2;
             let addressing = value & 0x03;
+            println!("Opcode: 0X{}", opcode);
             match opcode {
                 /* Data movement instructions */
                 LOAD_REGISTER => self.decode_ldr(addressing),
@@ -445,14 +315,19 @@ impl Cpu {
                 ROTATE_LEFT => self.decode_rol(addressing),
                 ROTATE_RIGHT => self.decode_ror(addressing),
                 BITWISE_AND => self.decode_and(addressing),
+                TEST_BIT_PATTERN => self.decode_test_bit_pattern(addressing),
                 BITWISE_OR => self.decode_or(addressing),
                 BITWISE_XOR => self.decode_xor(addressing),
                 BITWISE_NOT => self.decode_not(addressing),
                 /* Status flag instructions  */
                 SET_AUTO_INCREMENT_FLAG => self.decode_sai(addressing),
                 CLEAR_AUTO_INCREMENT_FLAG => self.decode_cla(addressing),
+                SET_CARRY_FLAG => self.decode_sec(addressing),
+                CLEAR_CARRY_FLAG => self.decode_clc(addressing),
                 SET_INTERRUPT_ENABLE_FLAG => self.decode_sei(addressing),
                 CLEAR_INTERRUPT_ENABLE_FLAG => self.decode_cli(addressing),
+                /* Branching instructions */
+                BRANCH_ON_CARRY_CLEAR => self.decode_bcc(addressing),
                 _ => self.illegal_opcode(),
             }
         } else {
@@ -936,6 +811,22 @@ impl Cpu {
         }
     }
 
+    fn decode_test_bit_pattern(&mut self, addressing: u8) {
+        match addressing & 0x03 {
+            REGISTER_REGISTER_ADDRESSING => {
+                self.state.micro_ops.push(MicroOp::FetchDestSrc);
+                self.state.micro_ops.push(MicroOp::TestBitPatternRegister);
+            },
+            REGISTER_IMMEDIATE_ADDRESSING => {
+                self.state.micro_ops.push(MicroOp::FetchDestSrc);
+                self.state.micro_ops.push(MicroOp::FetchValue);
+                self.state.micro_ops.push(MicroOp::TestBitPatternImmediate);
+            },
+            _ =>  self.illegal_opcode(),
+        }
+    }
+
+
     fn decode_or(&mut self, addressing: u8) {
         match addressing & 0x03 {
             REGISTER_REGISTER_ADDRESSING => {
@@ -1008,6 +899,30 @@ impl Cpu {
         }
     }
 
+    fn decode_clc(&mut self, addressing: u8) {
+        match addressing & 0x03 {
+            IMPLICIT_ADDRESSING =>
+                self.state.micro_ops.push(MicroOp::ClearCarryFlag),
+            _ =>  self.illegal_opcode(),
+        }
+    }
+
+    fn decode_sec(&mut self, addressing: u8) {
+        match addressing & 0x03 {
+            IMPLICIT_ADDRESSING =>
+                self.state.micro_ops.push(MicroOp::SetCarryFlag),
+            _ =>  self.illegal_opcode(),
+        }
+    }
+
+    fn decode_bcc(&mut self, addressing: u8) {
+        match addressing & 0x03 {
+            RELATIVE_ADDRESSING =>
+                self.state.micro_ops.push(MicroOp::BranchIfCarryClear),
+            _ => self.illegal_opcode(),
+        }
+    }
+
     fn execute_micro_op(&mut self) {
 
         let current_op = self.state.micro_ops[self.state.index];
@@ -1020,6 +935,12 @@ impl Cpu {
             },
             MicroOp::ClearAutoIncrementFlag => {
                 self.registers.clear_autoincrement_flag();
+            },
+            MicroOp::SetCarryFlag => {
+                self.registers.set_carry_flag();
+            },
+            MicroOp::ClearCarryFlag => {
+                self.registers.clear_carry_flag();
             },
             MicroOp::SetInterruptFlag => {
                 self.registers.set_interrupt_flag();
@@ -1564,6 +1485,26 @@ impl Cpu {
 
                 self.store_register(destination, result);
             },
+            MicroOp::TestBitPatternRegister => {
+                let src1 = (self.state.dest_src_register >> 2) & 0x03;
+                let src2 = (self.state.dest_src_register >> 4) & 0x03;
+
+                let src1val = self.load_register(src1);
+                let src2val = self.load_register(src2);
+                let result = src1val & src2val;
+                // like BitwiseAnd, but result is only used to modify flags
+                self.registers.set_zero_negative_flags(result);
+            },
+            MicroOp::TestBitPatternImmediate => {
+                let src1 = (self.state.dest_src_register >> 2) & 0x03;
+
+                let src1val = self.load_register(src1);
+                let src2val = self.state.value_register;
+                let result = src1val & src2val;
+
+                // like BitwiseAnd, but result is only used to modify flags
+                self.registers.set_zero_negative_flags(result);
+            },
             MicroOp::BitwiseOrRegister => {
                 let destination = self.state.dest_src_register & 0x03;
                 let src1 = (self.state.dest_src_register >> 2) & 0x03;
@@ -1615,6 +1556,16 @@ impl Cpu {
 
                 self.store_register(destination, result);
             },
+            MicroOp::BranchIfCarryClear => {
+                let offset = self.read_pc();
+                if !self.registers.carry_flag() {
+                    if offset < 128 {
+                        self.registers.pc += offset as u16;
+                    } else {
+                        self.registers.pc -= offset.wrapping_neg() as u16;
+                    }
+                }
+            }
         }
 
         self.state.index += 1;
@@ -1662,7 +1613,6 @@ impl Cpu {
             _ => unreachable!(),
         }
     }
-
 
     fn illegal_opcode(&mut self) {
         self.fault(ILLEGAL_OPCODE_VECTOR);
@@ -1715,6 +1665,14 @@ mod tests {
 
     fn emit_clear_auto_increment(opcodes: &mut Vec<u8>) {
         opcodes.push(CLEAR_AUTO_INCREMENT_FLAG << 2);
+    }
+
+    fn emit_set_carry(opcodes: &mut Vec<u8>) {
+        opcodes.push(SET_CARRY_FLAG << 2);
+    }
+
+    fn emit_clear_carry(opcodes: &mut Vec<u8>) {
+        opcodes.push(CLEAR_CARRY_FLAG << 2);
     }
 
     fn emit_set_interrupt_enable(opcodes: &mut Vec<u8>) {
@@ -2145,6 +2103,27 @@ mod tests {
         opcodes.push(immediate);
     }
 
+    fn emit_test_bit_pattern_reg_reg(
+        opcodes: &mut Vec<u8>,
+        src_1: u8,
+        src_2: u8) {
+        opcodes.push((TEST_BIT_PATTERN) << 2 | REGISTER_REGISTER_ADDRESSING);
+        opcodes.push(
+            ((src_1 & 0x03) << 2) |
+            ((src_2 & 0x03) << 4));
+    }
+
+    fn emit_test_bit_pattern_reg_immediate(
+        opcodes: &mut Vec<u8>,
+        src_1: u8,
+        immediate: u8) {
+        opcodes.push((TEST_BIT_PATTERN) << 2 | REGISTER_IMMEDIATE_ADDRESSING);
+        opcodes.push(
+            ((src_1 & 0x03) << 2));
+        opcodes.push(immediate);
+    }
+
+
     fn emit_bitwise_or_reg_reg(
         opcodes: &mut Vec<u8>,
         destination: u8,
@@ -2203,6 +2182,12 @@ mod tests {
             ((src & 0x03) << 2));
     }
 
+    fn emit_branch_on_carry_clear(
+        opcodes: &mut Vec<u8>,
+        offset: u8) {
+        opcodes.push((BRANCH_ON_CARRY_CLEAR) << 2);
+        opcodes.push(offset);
+    }
 
     fn update_program(cpu: &mut Cpu, program: Vec<u8>, load_address: u16) {
         cpu.registers.pc = load_address;
@@ -2245,13 +2230,36 @@ mod tests {
     }
 
     #[test]
+    fn set_carry_sets_the_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_set_carry(&mut program);
+        update_program(&mut cpu, program, 0x1000);
+
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.carry_flag());
+    }
+
+    #[test]
+    fn clear_carry_clears_the_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+        emit_clear_carry(&mut program);
+        update_program(&mut cpu, program, 0x1000);
+
+        cpu.registers.flags = CARRY_FLAG;
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.carry_flag());
+    }
+
+    #[test]
     fn set_interrupt_flag_sets_the_flag() {
         let mut cpu = create_test_cpu();
         let mut program = vec![];
         emit_set_interrupt_enable(&mut program);
         update_program(&mut cpu, program, 0x1000);
 
-        cpu.registers.flags = 0;
         execute_instruction(&mut cpu);
 
         assert!(cpu.registers.interrupt_flag());
@@ -6889,6 +6897,177 @@ mod tests {
         assert!(cpu.registers.negative_flag());
     }
 
+  #[test]
+    fn test_bit_pattern_does_not_modify_registers() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_test_bit_pattern_reg_reg(
+            &mut program,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 0xAF;
+        cpu.registers.r2 = 0xCE;
+        cpu.registers.r3 = 0x20;
+        cpu.registers.r4 = 0x14;
+
+
+        execute_instruction(&mut cpu);
+
+        assert_eq!(0xAF, cpu.registers.r1);
+        assert_eq!(0xCE, cpu.registers.r2);
+        assert_eq!(0x20, cpu.registers.r3);
+        assert_eq!(0x14, cpu.registers.r4);
+    }
+
+    #[test]
+    fn test_bit_pattern_reg_reg_sets_and_unsets_zero_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_test_bit_pattern_reg_reg(
+            &mut program,
+            ENCODING_R2,
+            ENCODING_R1);
+        emit_test_bit_pattern_reg_reg(
+            &mut program,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = ZERO_FLAG;
+        cpu.registers.r1 = 0xAF;
+        cpu.registers.r2 = 0xCE;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.zero_flag());
+
+        cpu.registers.flags = 0;
+        cpu.registers.r1 = 0x10;
+        cpu.registers.r2 = 0x8F;
+
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.zero_flag());
+    }
+
+    #[test]
+    fn test_bit_pattern_reg_reg_sets_and_unsets_negative_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_test_bit_pattern_reg_reg(
+            &mut program,
+            ENCODING_R2,
+            ENCODING_R1);
+        emit_test_bit_pattern_reg_reg(
+            &mut program,
+            ENCODING_R2,
+            ENCODING_R1);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = NEGATIVE_FLAG;
+        cpu.registers.r1 = 0x0F;
+        cpu.registers.r2 = 0x0E;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.negative_flag());
+
+        cpu.registers.flags = 0;
+        cpu.registers.r1 = 0xF0;
+        cpu.registers.r2 = 0x8F;
+
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.negative_flag());
+    }
+
+
+    #[test]
+    fn test_bit_pattern_immediate_does_not_modify_registers() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_test_bit_pattern_reg_immediate(
+            &mut program,
+            ENCODING_R2,
+            0xAF);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 0xCA;
+        cpu.registers.r2 = 0xFE;
+        cpu.registers.r3 = 0xBA;
+        cpu.registers.r4 = 0xBE;
+
+        execute_instruction(&mut cpu);
+        assert_eq!(0xCA, cpu.registers.r1);
+        assert_eq!(0xFE, cpu.registers.r2);
+        assert_eq!(0xBA, cpu.registers.r3);
+        assert_eq!(0xBE, cpu.registers.r4);
+    }
+
+    #[test]
+    fn test_bit_pattern_immediate_sets_and_unsets_zero_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_test_bit_pattern_reg_immediate(
+            &mut program,
+            ENCODING_R2,
+            0xAF);
+        emit_test_bit_pattern_reg_immediate(
+            &mut program,
+            ENCODING_R2,
+            0x10);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = ZERO_FLAG;
+        cpu.registers.r2 = 0xCE;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.zero_flag());
+
+        cpu.registers.flags = 0;
+        cpu.registers.r2 = 0x8F;
+
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.zero_flag());
+    }
+
+    #[test]
+    fn test_bit_pattern_immediate_sets_and_unsets_negative_flag() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_test_bit_pattern_reg_immediate(
+            &mut program,
+            ENCODING_R2,
+            0x0F);
+        emit_test_bit_pattern_reg_immediate(
+            &mut program,
+            ENCODING_R2,
+            0xF0);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.flags = NEGATIVE_FLAG;
+        cpu.registers.r2 = 0x0E;
+
+        execute_instruction(&mut cpu);
+        assert!(!cpu.registers.negative_flag());
+
+        cpu.registers.flags = 0;
+        cpu.registers.r2 = 0x8F;
+
+        execute_instruction(&mut cpu);
+        assert!(cpu.registers.negative_flag());
+    }
+
     #[test]
     fn bitwise_or_reg_reg_stores_correct_result_in_destination_register() {
         let mut cpu = create_test_cpu();
@@ -7312,8 +7491,6 @@ mod tests {
         assert!(cpu.registers.zero_flag());
     }
 
-
-
     #[test]
     fn bitwise_not_sets_and_unsets_negative_flag() {
         let mut cpu = create_test_cpu();
@@ -7343,5 +7520,77 @@ mod tests {
 
         execute_instruction(&mut cpu);
         assert!(cpu.registers.negative_flag());
+    }
+
+    #[test]
+    fn branch_on_carry_clear_jumps_if_carry_is_not_set() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        let offset = 30;
+        emit_branch_on_carry_clear(&mut program, offset);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.clear_carry_flag();
+        let old_pc = cpu.registers.pc;
+        execute_instruction(&mut cpu);
+        // +2, as pc is incremented when decoding the instruction
+        assert_eq!(old_pc + 2 + offset as u16, cpu.registers.pc);
+    }
+
+    #[test]
+    fn branch_on_carry_clear_does_not_jump_if_carry_is_set() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        let offset = 30;
+        emit_branch_on_carry_clear(&mut program, offset);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.set_carry_flag();
+        let old_pc = cpu.registers.pc;
+        execute_instruction(&mut cpu);
+
+        // +2, as pc is incremented when decoding the instruction
+        assert_eq!(old_pc + 2, cpu.registers.pc);
+    }
+
+    #[test]
+    fn branch_on_carry_clear_with_zero_offset_does_not_modify_pc() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        let offset = 0;
+        emit_branch_on_carry_clear(&mut program, offset);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.clear_carry_flag();
+        let old_pc = cpu.registers.pc;
+        execute_instruction(&mut cpu);
+
+        // +2, as pc is incremented when decoding the instruction
+        assert_eq!(old_pc + 2, cpu.registers.pc);
+    }
+
+    #[test]
+    fn branch_on_carry_with_negative_offset_sets_pc_correctly() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        let offset_positive = 30;
+        let offset = (offset_positive as u8).wrapping_neg();
+        emit_branch_on_carry_clear(&mut program, offset);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.clear_carry_flag();
+        let old_pc = cpu.registers.pc;
+        execute_instruction(&mut cpu);
+
+        // +2, as pc is incremented when decoding the instruction
+        assert_eq!(old_pc + 2 - offset_positive as u16, cpu.registers.pc);
     }
 }
