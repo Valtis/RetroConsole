@@ -33,7 +33,6 @@ const REGISTER_REGISTER_ADDRESSING: u8 = 0x00;
 const REGISTER_IMMEDIATE_ADDRESSING: u8 = 0x01;
 
 
-
 /* Set/Clear flag addressing mode */
 const IMPLICIT_ADDRESSING: u8 = 0x00;
 /* Conditional branching instructions */
@@ -58,6 +57,9 @@ const CLEAR_INTERRUPT_ENABLE_FLAG: u8 = 0x02;
 /* Data movement instructions  */
 const LOAD_REGISTER: u8 = 0x10;
 const STORE_REGISTER: u8 = 0x11;
+
+const PUSH_REGISTER: u8 = 0x12;
+const POP_REGISTER: u8 = 0x13;
 
 /* Arithmetic instructions */
 
@@ -184,6 +186,16 @@ enum MicroOp {
     BitwiseXorImmediate,
     BitwiseNotRegister,
     BranchIfCarryClear,
+    LoadR1FromStack,
+    LoadR2FromStack,
+    LoadR3FromStack,
+    LoadR4FromStack,
+    StoreR1IntoStack,
+    StoreR2IntoStack,
+    StoreR3IntoStack,
+    StoreR4IntoStack,
+    IncrementSp,
+    DecrementSp
 }
 
 
@@ -274,15 +286,20 @@ impl Cpu {
         value
     }
 
-
     fn write(&mut self, address: u16, value: u8) {
         self.memory_controller.borrow_mut().write(address, value);
     }
 
-    fn push(&mut self, value: u8) {
+    // intentionally does not modify sp, as this should be done at separate
+    // step in order to maintain believable instruction timings
+    fn store_at_sp(&mut self, value: u8) {
         let sp = self.registers.sp;
         self.write(sp, value);
-        self.registers.sp -= 1;
+    }
+
+    fn load_from_sp(&mut self) -> u8 {
+        let sp = self.registers.sp;
+        self.read(sp)
     }
 
     pub fn execute(&mut self) {
@@ -328,6 +345,8 @@ impl Cpu {
                 CLEAR_INTERRUPT_ENABLE_FLAG => self.decode_cli(addressing),
                 /* Branching instructions */
                 BRANCH_ON_CARRY_CLEAR => self.decode_bcc(addressing),
+                PUSH_REGISTER => self.decode_push(addressing),
+                POP_REGISTER => self.decode_pop(addressing),
                 _ => self.illegal_opcode(),
             }
         } else {
@@ -410,6 +429,38 @@ impl Cpu {
             },
             _ => unreachable!(),
         }
+    }
+
+    fn decode_push(&mut self, addressing: u8) {
+        match addressing & 0x03 {
+            ENCODING_R1 => self.state.micro_ops.push(
+                MicroOp::StoreR1IntoStack),
+            ENCODING_R2 => self.state.micro_ops.push(
+                MicroOp::StoreR2IntoStack),
+            ENCODING_R3 => self.state.micro_ops.push(
+                MicroOp::StoreR3IntoStack),
+            ENCODING_R4 => self.state.micro_ops.push(
+                MicroOp::StoreR4IntoStack),
+            _ => unreachable!(),
+        }
+
+        self.state.micro_ops.push(MicroOp::DecrementSp);
+    }
+
+    fn decode_pop(&mut self, addressing: u8) {
+        self.state.micro_ops.push(MicroOp::IncrementSp);
+        match addressing & 0x03 {
+            ENCODING_R1 => self.state.micro_ops.push(
+                MicroOp::LoadR1FromStack),
+            ENCODING_R2 => self.state.micro_ops.push(
+                MicroOp::LoadR2FromStack),
+            ENCODING_R3 => self.state.micro_ops.push(
+                MicroOp::LoadR3FromStack),
+            ENCODING_R4 => self.state.micro_ops.push(
+                MicroOp::LoadR4FromStack),
+            _ => unreachable!(),
+        }
+
     }
 
     fn decode_adc(&mut self, addressing: u8) {
@@ -1002,15 +1053,15 @@ impl Cpu {
             },
             MicroOp::PushPCHighByte => {
                 let byte = (self.registers.pc >> 8) as u8;
-                self.push(byte);
+                self.store_at_sp(byte);
             },
             MicroOp::PushPCLowByte => {
                 let byte = self.registers.pc as u8;
-                self.push(byte);
+                self.store_at_sp(byte);
             },
             MicroOp::PushStatusFlags => {
                 let flags = self.registers.flags;
-                self.push(flags);
+                self.store_at_sp(flags);
             },
             MicroOp::ImmedateToRegister => {
                 let immediate = self.read_pc();
@@ -1027,7 +1078,41 @@ impl Cpu {
                 let value = self.load_register(src);
                 let address = self.state.address_register;
                 self.write(address, value);
-            }
+            },
+            MicroOp::StoreR1IntoStack => {
+                let r = self.registers.r1;
+                self.store_at_sp(r);
+            },
+            MicroOp::StoreR2IntoStack => {
+                let r = self.registers.r2;
+                self.store_at_sp(r);
+            },
+            MicroOp::StoreR3IntoStack => {
+                let r = self.registers.r3;
+                self.store_at_sp(r);
+            },
+            MicroOp::StoreR4IntoStack => {
+                let r = self.registers.r4;
+                self.store_at_sp(r);
+            },
+            MicroOp::LoadR1FromStack => {
+                self.registers.r1 = self.load_from_sp();
+            },
+            MicroOp::LoadR2FromStack  => {
+                self.registers.r2 = self.load_from_sp();
+            },
+            MicroOp::LoadR3FromStack  => {
+                self.registers.r3 = self.load_from_sp();
+            },
+            MicroOp::LoadR4FromStack  => {
+                self.registers.r4 = self.load_from_sp();
+            },
+            MicroOp::IncrementSp => {
+                self.registers.sp += 1;
+            },
+            MicroOp::DecrementSp => {
+                self.registers.sp -= 1;
+            },
             MicroOp::IndexedAddress => {
                 let index_reg = (self.state.dest_src_register >> 2) & 0x03;
                 let value = self.load_register(index_reg);
@@ -1637,8 +1722,11 @@ impl Cpu {
     fn start_interrupt(&mut self) {
         self.state.micro_ops.clear();
         self.state.micro_ops.push(MicroOp::PushPCHighByte);
+        self.state.micro_ops.push(MicroOp::DecrementSp);
         self.state.micro_ops.push(MicroOp::PushPCLowByte);
+        self.state.micro_ops.push(MicroOp::DecrementSp);
         self.state.micro_ops.push(MicroOp::PushStatusFlags);
+        self.state.micro_ops.push(MicroOp::DecrementSp);
         self.state.micro_ops.push(MicroOp::ClearInterruptFlag);
         self.state.micro_ops.push(MicroOp::FetchInterruptVectorLowByte);
         self.state.micro_ops.push(MicroOp::FetchInterruptVectorHighByte);
@@ -1723,6 +1811,17 @@ mod tests {
         opcodes.push((address >> 8)  as u8);
     }
 
+    fn emit_push(
+        opcodes: &mut Vec<u8>,
+        register: u8) {
+        opcodes.push((PUSH_REGISTER << 2) | (register & 0x03));
+    }
+
+    fn emit_pop(
+        opcodes: &mut Vec<u8>,
+        register: u8) {
+        opcodes.push((POP_REGISTER << 2) | (register & 0x03));
+    }
 
     // Invalid opcode, exists for testing.
     fn emit_store_immediate(
@@ -2837,7 +2936,7 @@ mod tests {
 
     #[test]
     fn store_indirect_increments_address_if_flag_is_set() {
-                let mut cpu = create_test_cpu();
+        let mut cpu = create_test_cpu();
         let mut program = vec![];
 
         emit_store_indirect(
@@ -2855,6 +2954,272 @@ mod tests {
 
         assert_eq!(0xDA, cpu.read(0x1234));
         assert_eq!(0x38, cpu.read(0x1235));
+    }
+
+    #[test]
+    fn push_register_1_pushes_the_value() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_push(
+            &mut program, ENCODING_R1);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 0x9A;
+        let stack_ptr = cpu.registers.sp;
+        execute_instruction(&mut cpu);
+        assert_eq!(0x9A, cpu.read(stack_ptr));
+    }
+
+    #[test]
+    fn push_register_1_decrements_the_stack_pointer() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_push(
+            &mut program, ENCODING_R1);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 0x9A;
+        let stack_ptr = cpu.registers.sp;
+        execute_instruction(&mut cpu);
+        assert_eq!(stack_ptr - 1, cpu.registers.sp);
+    }
+
+    #[test]
+    fn push_register_2_pushes_the_value() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_push(
+            &mut program, ENCODING_R2);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r2 = 0x9B;
+        let stack_ptr = cpu.registers.sp;
+        execute_instruction(&mut cpu);
+        assert_eq!(0x9B, cpu.read(stack_ptr));
+    }
+
+    #[test]
+    fn push_register_2_decrements_the_stack_pointer() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_push(
+            &mut program, ENCODING_R2);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r2 = 0x9A;
+        let stack_ptr = cpu.registers.sp;
+        execute_instruction(&mut cpu);
+        assert_eq!(stack_ptr - 1, cpu.registers.sp);
+    }
+
+
+    #[test]
+    fn push_register_3_pushes_the_value() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_push(
+            &mut program, ENCODING_R3);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r3 = 0xFC;
+        let stack_ptr = cpu.registers.sp;
+        execute_instruction(&mut cpu);
+        assert_eq!(0xFC, cpu.read(stack_ptr));
+    }
+
+    #[test]
+    fn push_register_3_decrements_the_stack_pointer() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_push(
+            &mut program, ENCODING_R3);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r3 = 0x9A;
+        let stack_ptr = cpu.registers.sp;
+        execute_instruction(&mut cpu);
+        assert_eq!(stack_ptr - 1, cpu.registers.sp);
+    }
+
+    #[test]
+    fn push_register_4_pushes_the_value() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_push(
+            &mut program, ENCODING_R4);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r4 = 0xA8;
+        let stack_ptr = cpu.registers.sp;
+        execute_instruction(&mut cpu);
+        assert_eq!(0xA8, cpu.read(stack_ptr));
+    }
+
+    #[test]
+    fn push_register_4_decrements_the_stack_pointer() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_push(
+            &mut program, ENCODING_R4);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r4 = 0x9A;
+        let stack_ptr = cpu.registers.sp;
+        execute_instruction(&mut cpu);
+        assert_eq!(stack_ptr - 1, cpu.registers.sp);
+    }
+
+    #[test]
+    fn pop_register_1_loads_value_from_stack() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_pop(
+            &mut program, ENCODING_R1);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 0x00;
+        cpu.registers.sp = 0xFFF;
+        cpu.write(0x1000, 0xAC);
+
+        let stack_ptr = cpu.registers.sp;
+        execute_instruction(&mut cpu);
+        assert_eq!(0xAC, cpu.registers.r1);
+    }
+
+    #[test]
+    fn pop_register_1_increments_stack_pointer() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_pop(
+            &mut program, ENCODING_R1);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 0x00;
+        cpu.registers.sp = 0xFFF;
+        cpu.write(0x1000, 0xAC);
+
+        let stack_ptr = cpu.registers.sp;
+        execute_instruction(&mut cpu);
+        assert_eq!(stack_ptr + 1, cpu.registers.sp);
+    }
+
+    #[test]
+    fn pop_register_2_loads_value_from_stack() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_pop(
+            &mut program, ENCODING_R2);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 0x00;
+        cpu.registers.sp = 0xFFF;
+        cpu.write(0x1000, 0x54);
+
+        let stack_ptr = cpu.registers.sp;
+        execute_instruction(&mut cpu);
+        assert_eq!(0x54, cpu.registers.r2);
+    }
+
+    #[test]
+    fn pop_register_2_increments_stack_pointer() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_pop(
+            &mut program, ENCODING_R2);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r2 = 0x00;
+        cpu.registers.sp = 0xFFF;
+        cpu.write(0x1000, 0xAC);
+
+        let stack_ptr = cpu.registers.sp;
+        execute_instruction(&mut cpu);
+        assert_eq!(stack_ptr + 1, cpu.registers.sp);
+    }
+
+
+    #[test]
+    fn pop_register_3_loads_value_from_stack() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_pop(
+            &mut program, ENCODING_R3);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r3 = 0x00;
+        cpu.registers.sp = 0xFFF;
+        cpu.write(0x1000, 0x6);
+
+        let stack_ptr = cpu.registers.sp;
+        execute_instruction(&mut cpu);
+        assert_eq!(0x6, cpu.registers.r3);
+    }
+
+    #[test]
+    fn pop_register_3_increments_stack_pointer() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_pop(
+            &mut program, ENCODING_R3);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r3 = 0x00;
+        cpu.registers.sp = 0xFFF;
+        cpu.write(0x1000, 0xAC);
+
+        let stack_ptr = cpu.registers.sp;
+        execute_instruction(&mut cpu);
+        assert_eq!(stack_ptr + 1, cpu.registers.sp);
+    }
+
+    #[test]
+    fn pop_register_4_loads_value_from_stack() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_pop(
+            &mut program, ENCODING_R4);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r4 = 0x00;
+        cpu.registers.sp = 0xFFF;
+        cpu.write(0x1000, 0x92);
+
+        let stack_ptr = cpu.registers.sp;
+        execute_instruction(&mut cpu);
+        assert_eq!(0x92, cpu.registers.r4);
+    }
+
+    #[test]
+    fn pop_register_4_increments_stack_pointer() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_pop(
+            &mut program, ENCODING_R4);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r4 = 0x00;
+        cpu.registers.sp = 0xFFF;
+        cpu.write(0x1000, 0xAC);
+
+        let stack_ptr = cpu.registers.sp;
+        execute_instruction(&mut cpu);
+        assert_eq!(stack_ptr + 1, cpu.registers.sp);
     }
 
     #[test]
