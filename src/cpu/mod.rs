@@ -1356,7 +1356,7 @@ impl Cpu {
 
             }
             MicroOp::EndUnsignedMultiply => {
-                let (res, high, _) = self.end_mul_common();
+                let (_, high, _) = self.end_mul_common();
                 if high == 0 {
                     self.registers.clear_overflow_flag();
                     self.registers.clear_carry_flag();
@@ -2300,7 +2300,7 @@ mod tests {
         immediate: u8) {
         opcodes.push((TEST_BIT_PATTERN) << 2 | REGISTER_IMMEDIATE_ADDRESSING);
         opcodes.push(
-            ((src_1 & 0x03) << 2));
+            (src_1 & 0x03) << 2);
         opcodes.push(immediate);
     }
 
