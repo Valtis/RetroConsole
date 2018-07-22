@@ -94,6 +94,7 @@ const TEST_BIT_PATTERN: u8 = 0x29;
 
 /* Branching instructions */
 const BRANCH_ON_CARRY_CLEAR: u8 = 0x38;
+const BRANCH_ON_CARRY_SET: u8 = 0x39;
 
 
 
@@ -188,6 +189,7 @@ enum MicroOp {
     BitwiseXorImmediate,
     BitwiseNotRegister,
     BranchIfCarryClear,
+    BranchIfCarrySet,
     LoadR1FromStack,
     LoadR2FromStack,
     LoadR3FromStack,
@@ -347,6 +349,7 @@ impl Cpu {
                 CLEAR_INTERRUPT_ENABLE_FLAG => self.decode_cli(addressing),
                 /* Branching instructions */
                 BRANCH_ON_CARRY_CLEAR => self.decode_bcc(addressing),
+                BRANCH_ON_CARRY_SET => self.decode_bcs(addressing),
                 PUSH_REGISTER => self.decode_push(addressing),
                 POP_REGISTER => self.decode_pop(addressing),
                 _ => self.illegal_opcode(),
@@ -978,6 +981,14 @@ impl Cpu {
         match addressing & 0x03 {
             RELATIVE_ADDRESSING =>
                 self.state.micro_ops.push(MicroOp::BranchIfCarryClear),
+            _ => self.illegal_opcode(),
+        }
+    }
+
+    fn decode_bcs(&mut self, addressing: u8) {
+        match addressing & 0x03 {
+            RELATIVE_ADDRESSING =>
+                self.state.micro_ops.push(MicroOp::BranchIfCarrySet),
             _ => self.illegal_opcode(),
         }
     }
@@ -1703,7 +1714,17 @@ impl Cpu {
                         self.registers.pc -= offset.wrapping_neg() as u16;
                     }
                 }
-            }
+            },
+            MicroOp::BranchIfCarrySet => {
+                let offset = self.read_pc();
+                if self.registers.carry_flag() {
+                    if offset < 128 {
+                        self.registers.pc += offset as u16;
+                    } else {
+                        self.registers.pc -= offset.wrapping_neg() as u16;
+                    }
+                }
+            },
         }
 
         self.state.index += 1;
@@ -2367,6 +2388,13 @@ mod tests {
         opcodes: &mut Vec<u8>,
         offset: u8) {
         opcodes.push((BRANCH_ON_CARRY_CLEAR) << 2);
+        opcodes.push(offset);
+    }
+
+    fn emit_branch_on_carry_set(
+        opcodes: &mut Vec<u8>,
+        offset: u8) {
+        opcodes.push((BRANCH_ON_CARRY_SET) << 2);
         opcodes.push(offset);
     }
 
@@ -8501,7 +8529,7 @@ mod tests {
     }
 
     #[test]
-    fn branch_on_carry_with_negative_offset_sets_pc_correctly() {
+    fn branch_on_carry_clear_with_negative_offset_sets_pc_correctly() {
         let mut cpu = create_test_cpu();
         let mut program = vec![];
 
@@ -8512,6 +8540,77 @@ mod tests {
         update_program(&mut cpu, program, 0x2000);
 
         cpu.registers.clear_carry_flag();
+        let old_pc = cpu.registers.pc;
+        execute_instruction(&mut cpu);
+
+        // +2, as pc is incremented when decoding the instruction
+        assert_eq!(old_pc + 2 - offset_positive as u16, cpu.registers.pc);
+    }
+
+    #[test]
+    fn branch_on_carry_set_jumps_if_carry_is_set() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        let offset = 30;
+        emit_branch_on_carry_set(&mut program, offset);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.set_carry_flag();
+        let old_pc = cpu.registers.pc;
+        execute_instruction(&mut cpu);
+        // +2, as pc is incremented when decoding the instruction
+        assert_eq!(old_pc + 2 + offset as u16, cpu.registers.pc);
+    }
+
+    #[test]
+    fn branch_on_carry_set_does_not_jump_if_carry_is_not_set() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        let offset = 30;
+        emit_branch_on_carry_set(&mut program, offset);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.clear_carry_flag();
+        let old_pc = cpu.registers.pc;
+        execute_instruction(&mut cpu);
+
+        // +2, as pc is incremented when decoding the instruction
+        assert_eq!(old_pc + 2, cpu.registers.pc);
+    }
+
+    #[test]
+    fn branch_on_carry_set_with_zero_offset_does_not_modify_pc() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        let offset = 0;
+        emit_branch_on_carry_set(&mut program, offset);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.set_carry_flag();
+        let old_pc = cpu.registers.pc;
+        execute_instruction(&mut cpu);
+        // +2, as pc is incremented when decoding the instruction
+        assert_eq!(old_pc + 2, cpu.registers.pc);
+    }
+
+    #[test]
+    fn branch_on_carry_set_with_negative_offset_sets_pc_correctly() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        let offset_positive = 30;
+        let offset = (offset_positive as u8).wrapping_neg();
+        emit_branch_on_carry_set(&mut program, offset);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.set_carry_flag();
         let old_pc = cpu.registers.pc;
         execute_instruction(&mut cpu);
 
