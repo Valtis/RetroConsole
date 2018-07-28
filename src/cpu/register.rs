@@ -94,6 +94,14 @@ impl Registers {
         }
     }
 
+    pub fn set_negative_flag(&mut self) {
+        self.flags |= NEGATIVE_FLAG;
+    }
+
+    pub fn clear_negative_flag(&mut self) {
+        self.flags &= !NEGATIVE_FLAG;
+    }
+
     pub fn set_carry_flag_on_value(&mut self, result: u16) {
         if result > 255 {
             self.set_carry_flag();

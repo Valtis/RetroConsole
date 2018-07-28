@@ -12,7 +12,8 @@ use self::register::{
     INTERRUPT_ENABLE_FLAG,
     BREAK_FLAG,
     AUTO_INCREMENT_FLAG,
-    FAULT_FLAG};
+    FAULT_FLAG
+};
 
 
 
@@ -95,6 +96,12 @@ const TEST_BIT_PATTERN: u8 = 0x29;
 /* Branching instructions */
 const BRANCH_ON_CARRY_CLEAR: u8 = 0x38;
 const BRANCH_ON_CARRY_SET: u8 = 0x39;
+const BRANCH_ON_NOT_EQUAL: u8 = 0x3A;
+const BRANCH_ON_EQUAL: u8 = 0x3B;
+const BRANCH_ON_POSITIVE: u8 = 0x3C; 
+const BRANCH_ON_NEGATIVE: u8 = 0x3D;
+const BRANCH_ON_OVERFLOW_CLEAR: u8 = 0x3E;
+const BRANCH_ON_OVERFLOW_SET: u8 = 0x3F;
 
 
 
@@ -190,6 +197,12 @@ enum MicroOp {
     BitwiseNotRegister,
     BranchIfCarryClear,
     BranchIfCarrySet,
+    BranchOnEqual,
+    BranchOnNotEqual,
+    BranchOnNegative,
+    BranchOnPositive,
+    BranchOnOverflowClear,
+    BranchOnOverflowSet,
     LoadR1FromStack,
     LoadR2FromStack,
     LoadR3FromStack,
@@ -350,6 +363,12 @@ impl Cpu {
                 /* Branching instructions */
                 BRANCH_ON_CARRY_CLEAR => self.decode_bcc(addressing),
                 BRANCH_ON_CARRY_SET => self.decode_bcs(addressing),
+                BRANCH_ON_EQUAL => self.decode_beq(addressing),
+                BRANCH_ON_NOT_EQUAL => self.decode_bne(addressing),
+                BRANCH_ON_NEGATIVE => self.decode_bng(addressing),
+                BRANCH_ON_OVERFLOW_CLEAR => self.decode_boc(addressing),
+                BRANCH_ON_OVERFLOW_SET => self.decode_bos(addressing),
+                BRANCH_ON_POSITIVE => self.decode_bpo(addressing),
                 PUSH_REGISTER => self.decode_push(addressing),
                 POP_REGISTER => self.decode_pop(addressing),
                 _ => self.illegal_opcode(),
@@ -989,6 +1008,54 @@ impl Cpu {
         match addressing & 0x03 {
             RELATIVE_ADDRESSING =>
                 self.state.micro_ops.push(MicroOp::BranchIfCarrySet),
+            _ => self.illegal_opcode(),
+        }
+    }
+
+    fn decode_beq(&mut self, addressing: u8) {
+        match addressing & 0x03 {
+            RELATIVE_ADDRESSING => 
+                self.state.micro_ops.push(MicroOp::BranchOnEqual),
+            _ => self.illegal_opcode(),
+        }
+    }
+
+    fn decode_bne(&mut self, addressing: u8) {
+        match addressing & 0x03 {
+            RELATIVE_ADDRESSING => 
+                self.state.micro_ops.push(MicroOp::BranchOnNotEqual),
+            _ => self.illegal_opcode(),
+        }
+    }
+
+    fn decode_bng(&mut self, addressing: u8) {
+        match addressing & 0x03 {
+            RELATIVE_ADDRESSING => 
+                self.state.micro_ops.push(MicroOp::BranchOnNegative),
+            _ => self.illegal_opcode(),
+        }
+    }
+
+    fn decode_boc(&mut self, addressing: u8) {
+        match addressing & 0x03 {
+            RELATIVE_ADDRESSING => 
+                self.state.micro_ops.push(MicroOp::BranchOnOverflowClear),
+            _ => self.illegal_opcode(),
+        }
+    }
+
+    fn decode_bos(&mut self, addressing: u8) {
+        match addressing & 0x03 {
+            RELATIVE_ADDRESSING => 
+                self.state.micro_ops.push(MicroOp::BranchOnOverflowSet),
+            _ => self.illegal_opcode(),
+        }
+    }
+
+    fn decode_bpo(&mut self, addressing: u8) {
+        match addressing & 0x03 {
+            RELATIVE_ADDRESSING => 
+                self.state.micro_ops.push(MicroOp::BranchOnPositive),
             _ => self.illegal_opcode(),
         }
     }
@@ -1707,27 +1774,57 @@ impl Cpu {
             },
             MicroOp::BranchIfCarryClear => {
                 let offset = self.read_pc();
-                if !self.registers.carry_flag() {
-                    if offset < 128 {
-                        self.registers.pc += offset as u16;
-                    } else {
-                        self.registers.pc -= offset.wrapping_neg() as u16;
-                    }
-                }
+                let condition = !self.registers.carry_flag();
+                self.do_jump(condition, offset);
             },
             MicroOp::BranchIfCarrySet => {
                 let offset = self.read_pc();
-                if self.registers.carry_flag() {
-                    if offset < 128 {
-                        self.registers.pc += offset as u16;
-                    } else {
-                        self.registers.pc -= offset.wrapping_neg() as u16;
-                    }
-                }
+                let condition = self.registers.carry_flag();
+                self.do_jump(condition, offset);
+            },
+            MicroOp::BranchOnEqual => {
+                let offset = self.read_pc();
+                let condition = self.registers.zero_flag();
+                self.do_jump(condition, offset);
+            },
+            MicroOp::BranchOnNotEqual => {
+                let offset = self.read_pc();
+                let condition = !self.registers.zero_flag();
+                self.do_jump(condition, offset);
+            },
+            MicroOp::BranchOnNegative => {
+                let offset = self.read_pc();
+                let condition = self.registers.negative_flag();
+                self.do_jump(condition, offset);
+            },
+            MicroOp::BranchOnPositive => {
+                let offset = self.read_pc();
+                let condition = !self.registers.negative_flag();
+                self.do_jump(condition, offset);
+            },
+            MicroOp::BranchOnOverflowClear => {
+                let offset = self.read_pc();
+                let condition = !self.registers.overflow_flag();
+                self.do_jump(condition, offset);
+            },
+            MicroOp::BranchOnOverflowSet => {
+                let offset = self.read_pc();
+                let condition = self.registers.overflow_flag();
+                self.do_jump(condition, offset);
             },
         }
 
         self.state.index += 1;
+    }
+
+    fn do_jump(&mut self, condition: bool, offset: u8) {
+        if condition {
+           if offset < 128 {
+                self.registers.pc += offset as u16;
+            } else {
+                self.registers.pc -= offset.wrapping_neg() as u16;
+            } 
+        }
     }
 
     fn end_mul_common(&mut self) -> (u16, u8, u8) {
@@ -2395,6 +2492,48 @@ mod tests {
         opcodes: &mut Vec<u8>,
         offset: u8) {
         opcodes.push((BRANCH_ON_CARRY_SET) << 2);
+        opcodes.push(offset);
+    }
+
+    fn emit_branch_on_equal(
+        opcodes: &mut Vec<u8>,
+        offset: u8) {
+        opcodes.push((BRANCH_ON_EQUAL) << 2);
+        opcodes.push(offset);
+    }    
+
+    fn emit_branch_on_not_equal(
+        opcodes: &mut Vec<u8>,
+        offset: u8) {
+        opcodes.push((BRANCH_ON_NOT_EQUAL) << 2);
+        opcodes.push(offset);
+    }
+
+    fn emit_branch_on_negative(
+        opcodes: &mut Vec<u8>,
+        offset: u8) {
+        opcodes.push((BRANCH_ON_NEGATIVE) << 2);
+        opcodes.push(offset);
+    }
+
+    fn emit_branch_on_positive(
+        opcodes: &mut Vec<u8>,
+        offset: u8) {
+        opcodes.push((BRANCH_ON_POSITIVE) << 2);
+        opcodes.push(offset);
+    }
+
+    fn emit_branch_on_overflow_clear(
+        opcodes: &mut Vec<u8>,
+        offset: u8) {
+        opcodes.push((BRANCH_ON_OVERFLOW_CLEAR) << 2);
+        opcodes.push(offset);
+    }
+
+    fn emit_branch_on_overflow_set(
+        opcodes: &mut Vec<u8>,
+        offset: u8) {
+        opcodes.push((BRANCH_ON_OVERFLOW_SET) << 2);
         opcodes.push(offset);
     }
 
@@ -8611,6 +8750,432 @@ mod tests {
         update_program(&mut cpu, program, 0x2000);
 
         cpu.registers.set_carry_flag();
+        let old_pc = cpu.registers.pc;
+        execute_instruction(&mut cpu);
+
+        // +2, as pc is incremented when decoding the instruction
+        assert_eq!(old_pc + 2 - offset_positive as u16, cpu.registers.pc);
+    }
+
+    #[test]
+    fn branch_on_equal_jumps_if_zero_flag_is_set() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        let offset = 30;
+        emit_branch_on_equal(&mut program, offset);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.set_zero_flag();
+        let old_pc = cpu.registers.pc;
+        execute_instruction(&mut cpu);
+        // +2, as pc is incremented when decoding the instruction
+        assert_eq!(old_pc + 2 + offset as u16, cpu.registers.pc);
+    }
+
+    #[test]
+    fn branch_on_equal_does_not_jump_if_zero_flag_is_not_set() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        let offset = 30;
+        emit_branch_on_equal(&mut program, offset);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.clear_zero_flag();
+        let old_pc = cpu.registers.pc;
+        execute_instruction(&mut cpu);
+
+        // +2, as pc is incremented when decoding the instruction
+        assert_eq!(old_pc + 2, cpu.registers.pc);
+    }
+
+    #[test]
+    fn branch_on_equal_with_zero_offset_does_not_modify_pc() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        let offset = 0;
+        emit_branch_on_equal(&mut program, offset);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.set_zero_flag();
+        let old_pc = cpu.registers.pc;
+        execute_instruction(&mut cpu);
+        // +2, as pc is incremented when decoding the instruction
+        assert_eq!(old_pc + 2, cpu.registers.pc);
+    }
+
+    #[test]
+    fn branch_on_equal_with_negative_offset_sets_pc_correctly() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        let offset_positive = 30;
+        let offset = (offset_positive as u8).wrapping_neg();
+        emit_branch_on_equal(&mut program, offset);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.set_zero_flag();
+        let old_pc = cpu.registers.pc;
+        execute_instruction(&mut cpu);
+
+        // +2, as pc is incremented when decoding the instruction
+        assert_eq!(old_pc + 2 - offset_positive as u16, cpu.registers.pc);
+    }
+
+    #[test]
+    fn branch_on_not_equal_jumps_if_zero_flag_is_not_set() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        let offset = 30;
+        emit_branch_on_not_equal(&mut program, offset);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.clear_zero_flag();
+        let old_pc = cpu.registers.pc;
+        execute_instruction(&mut cpu);
+        // +2, as pc is incremented when decoding the instruction
+        assert_eq!(old_pc + 2 + offset as u16, cpu.registers.pc);
+    }
+
+    #[test]
+    fn branch_on_not_equal_does_not_jump_if_zero_flag_is_set() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        let offset = 30;
+        emit_branch_on_not_equal(&mut program, offset);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.set_zero_flag();
+        let old_pc = cpu.registers.pc;
+        execute_instruction(&mut cpu);
+
+        // +2, as pc is incremented when decoding the instruction
+        assert_eq!(old_pc + 2, cpu.registers.pc);
+    }
+
+    #[test]
+    fn branch_on_not_equal_with_zero_offset_does_not_modify_pc() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        let offset = 0;
+        emit_branch_on_not_equal(&mut program, offset);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.clear_zero_flag();
+        let old_pc = cpu.registers.pc;
+        execute_instruction(&mut cpu);
+        // +2, as pc is incremented when decoding the instruction
+        assert_eq!(old_pc + 2, cpu.registers.pc);
+    }
+
+    #[test]
+    fn branch_on_not_equal_with_negative_offset_sets_pc_correctly() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        let offset_positive = 30;
+        let offset = (offset_positive as u8).wrapping_neg();
+        emit_branch_on_not_equal(&mut program, offset);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.clear_zero_flag();
+        let old_pc = cpu.registers.pc;
+        execute_instruction(&mut cpu);
+
+        // +2, as pc is incremented when decoding the instruction
+        assert_eq!(old_pc + 2 - offset_positive as u16, cpu.registers.pc);
+    }
+
+    #[test]
+    fn branch_on_negative_jumps_if_negative_flag_is_set() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        let offset = 30;
+        emit_branch_on_negative(&mut program, offset);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.set_negative_flag();
+        let old_pc = cpu.registers.pc;
+        execute_instruction(&mut cpu);
+        // +2, as pc is incremented when decoding the instruction
+        assert_eq!(old_pc + 2 + offset as u16, cpu.registers.pc);
+    }
+
+    #[test]
+    fn branch_on_negative_does_not_jump_if_negative_flag_is_not_set() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        let offset = 30;
+        emit_branch_on_negative(&mut program, offset);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.clear_negative_flag();
+        let old_pc = cpu.registers.pc;
+        execute_instruction(&mut cpu);
+
+        // +2, as pc is incremented when decoding the instruction
+        assert_eq!(old_pc + 2, cpu.registers.pc);
+    }
+
+    #[test]
+    fn branch_on_negative_with_zero_offset_does_not_modify_pc() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        let offset = 0;
+        emit_branch_on_negative(&mut program, offset);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.set_negative_flag();
+        let old_pc = cpu.registers.pc;
+        execute_instruction(&mut cpu);
+        // +2, as pc is incremented when decoding the instruction
+        assert_eq!(old_pc + 2, cpu.registers.pc);
+    }
+
+    #[test]
+    fn branch_on_negative_with_negative_offset_sets_pc_correctly() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        let offset_positive = 30;
+        let offset = (offset_positive as u8).wrapping_neg();
+        emit_branch_on_negative(&mut program, offset);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.set_negative_flag();
+        let old_pc = cpu.registers.pc;
+        execute_instruction(&mut cpu);
+
+        // +2, as pc is incremented when decoding the instruction
+        assert_eq!(old_pc + 2 - offset_positive as u16, cpu.registers.pc);
+    }
+
+    #[test]
+    fn branch_on_positive_jumps_if_negative_flag_is_not_set() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        let offset = 30;
+        emit_branch_on_positive(&mut program, offset);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.clear_negative_flag();
+        let old_pc = cpu.registers.pc;
+        execute_instruction(&mut cpu);
+        // +2, as pc is incremented when decoding the instruction
+        assert_eq!(old_pc + 2 + offset as u16, cpu.registers.pc);
+    }
+
+    #[test]
+    fn branch_on_positive_does_not_jump_if_negative_flag_is_set() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        let offset = 30;
+        emit_branch_on_positive(&mut program, offset);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.set_negative_flag();
+        let old_pc = cpu.registers.pc;
+        execute_instruction(&mut cpu);
+
+        // +2, as pc is incremented when decoding the instruction
+        assert_eq!(old_pc + 2, cpu.registers.pc);
+    }
+
+    #[test]
+    fn branch_on_positive_with_zero_offset_does_not_modify_pc() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        let offset = 0;
+        emit_branch_on_positive(&mut program, offset);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.clear_negative_flag();
+        let old_pc = cpu.registers.pc;
+        execute_instruction(&mut cpu);
+        // +2, as pc is incremented when decoding the instruction
+        assert_eq!(old_pc + 2, cpu.registers.pc);
+    }
+
+    #[test]
+    fn branch_on_positive_with_negative_offset_sets_pc_correctly() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        let offset_positive = 30;
+        let offset = (offset_positive as u8).wrapping_neg();
+        emit_branch_on_positive(&mut program, offset);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.clear_negative_flag();
+        let old_pc = cpu.registers.pc;
+        execute_instruction(&mut cpu);
+
+        // +2, as pc is incremented when decoding the instruction
+        assert_eq!(old_pc + 2 - offset_positive as u16, cpu.registers.pc);
+    }
+
+    #[test]
+    fn branch_on_overflow_clear_jumps_if_overflow_flag_is_not_set() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        let offset = 30;
+        emit_branch_on_overflow_clear(&mut program, offset);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.clear_overflow_flag();
+        let old_pc = cpu.registers.pc;
+        execute_instruction(&mut cpu);
+        // +2, as pc is incremented when decoding the instruction
+        assert_eq!(old_pc + 2 + offset as u16, cpu.registers.pc);
+    }
+
+    #[test]
+    fn branch_on_overflow_clear_does_not_jump_if_overflow_flag_is_set() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        let offset = 30;
+        emit_branch_on_overflow_clear(&mut program, offset);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.set_overflow_flag();
+        let old_pc = cpu.registers.pc;
+        execute_instruction(&mut cpu);
+
+        // +2, as pc is incremented when decoding the instruction
+        assert_eq!(old_pc + 2, cpu.registers.pc);
+    }
+
+    #[test]
+    fn branch_on_overflow_clear_with_zero_offset_does_not_modify_pc() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        let offset = 0;
+        emit_branch_on_overflow_clear(&mut program, offset);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.clear_overflow_flag();
+        let old_pc = cpu.registers.pc;
+        execute_instruction(&mut cpu);
+        // +2, as pc is incremented when decoding the instruction
+        assert_eq!(old_pc + 2, cpu.registers.pc);
+    }
+
+    #[test]
+    fn branch_on_overflow_clear_with_negative_offset_sets_pc_correctly() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        let offset_positive = 30;
+        let offset = (offset_positive as u8).wrapping_neg();
+        emit_branch_on_overflow_clear(&mut program, offset);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.clear_overflow_flag();
+        let old_pc = cpu.registers.pc;
+        execute_instruction(&mut cpu);
+
+        // +2, as pc is incremented when decoding the instruction
+        assert_eq!(old_pc + 2 - offset_positive as u16, cpu.registers.pc);
+    }
+    
+    #[test]
+    fn branch_on_overflow_set_jumps_if_overflow_flag_is_set() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        let offset = 30;
+        emit_branch_on_overflow_set(&mut program, offset);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.set_overflow_flag();
+        let old_pc = cpu.registers.pc;
+        execute_instruction(&mut cpu);
+        // +2, as pc is incremented when decoding the instruction
+        assert_eq!(old_pc + 2 + offset as u16, cpu.registers.pc);
+    }
+
+    #[test]
+    fn branch_on_overflow_set_does_not_jump_if_overflow_flag_is_not_set() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        let offset = 30;
+        emit_branch_on_overflow_set(&mut program, offset);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.clear_overflow_flag();
+        let old_pc = cpu.registers.pc;
+        execute_instruction(&mut cpu);
+
+        // +2, as pc is incremented when decoding the instruction
+        assert_eq!(old_pc + 2, cpu.registers.pc);
+    }
+
+    #[test]
+    fn branch_on_overflow_set_with_zero_offset_does_not_modify_pc() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        let offset = 0;
+        emit_branch_on_overflow_set(&mut program, offset);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.set_overflow_flag();
+        let old_pc = cpu.registers.pc;
+        execute_instruction(&mut cpu);
+        // +2, as pc is incremented when decoding the instruction
+        assert_eq!(old_pc + 2, cpu.registers.pc);
+    }
+
+    #[test]
+    fn branch_on_overflow_set_with_negative_offset_sets_pc_correctly() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        let offset_positive = 30;
+        let offset = (offset_positive as u8).wrapping_neg();
+        emit_branch_on_overflow_set(&mut program, offset);
+
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.set_overflow_flag();
         let old_pc = cpu.registers.pc;
         execute_instruction(&mut cpu);
 
