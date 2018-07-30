@@ -15,8 +15,6 @@ use self::register::{
     FAULT_FLAG
 };
 
-
-
 /* Register encodings */
 const ENCODING_R1:u8 = 0x00;
 const ENCODING_R2:u8 = 0x01;
@@ -62,6 +60,9 @@ const STORE_REGISTER: u8 = 0x11;
 const PUSH_REGISTER: u8 = 0x12;
 const POP_REGISTER: u8 = 0x13;
 
+const LOAD_STACK_POINTER: u8 = 0x14;
+const STORE_STACK_POINTER: u8 = 0x15;
+
 /* Arithmetic instructions */
 
 const ADD_WITH_CARRY: u8 = 0x30;
@@ -102,8 +103,6 @@ const BRANCH_ON_POSITIVE: u8 = 0x3C;
 const BRANCH_ON_NEGATIVE: u8 = 0x3D;
 const BRANCH_ON_OVERFLOW_CLEAR: u8 = 0x3E;
 const BRANCH_ON_OVERFLOW_SET: u8 = 0x3F;
-
-
 
 /* Interrupt vector table address locations */
 const RESET_VECTOR: u16 = 0x00;
@@ -212,7 +211,9 @@ enum MicroOp {
     StoreR3IntoStack,
     StoreR4IntoStack,
     IncrementSp,
-    DecrementSp
+    DecrementSp,
+    LoadSp,
+    StoreSp,
 }
 
 
@@ -333,6 +334,8 @@ impl Cpu {
                 /* Data movement instructions */
                 LOAD_REGISTER => self.decode_ldr(addressing),
                 STORE_REGISTER => self.decode_str(addressing),
+                LOAD_STACK_POINTER => self.decode_lds(addressing),
+                STORE_STACK_POINTER => self.decode_sts(addressing),
                 /* Arithmetic instructions */
                 ADD_WITH_CARRY => self.decode_adc(addressing),
                 ADD_WITHOUT_CARRY => self.decode_add(addressing),
@@ -452,6 +455,24 @@ impl Cpu {
                 }
             },
             _ => unreachable!(),
+        }
+    }
+
+    fn decode_lds(&mut self, addressing: u8) {
+        match addressing & 0x03 {
+            IMPLICIT_ADDRESSING => {
+                self.state.micro_ops.push(MicroOp::LoadSp);
+            },
+            _ => self.illegal_opcode(),
+        }
+    }
+
+    fn decode_sts(&mut self, addressing: u8) {
+        match addressing & 0x03 {
+            IMPLICIT_ADDRESSING => {
+                self.state.micro_ops.push(MicroOp::StoreSp);
+            },
+            _ => self.illegal_opcode(),
         }
     }
 
@@ -1198,6 +1219,16 @@ impl Cpu {
             },
             MicroOp::DecrementSp => {
                 self.registers.sp -= 1;
+            },
+            MicroOp::StoreSp => {
+                let high_byte = (self.registers.sp >> 8) as u8;
+                let low_byte = self.registers.sp as u8;
+                self.registers.r1 = low_byte;
+                self.registers.r2 = high_byte;
+            },
+            MicroOp::LoadSp => {
+                let sp = ((self.registers.r2 as u16) << 8) | self.registers.r1 as u16;
+                self.registers.sp = sp;
             },
             MicroOp::IndexedAddress => {
                 let index_reg = (self.state.dest_src_register >> 2) & 0x03;
@@ -1982,6 +2013,11 @@ mod tests {
         opcodes.push((address >> 8)  as u8);
     }
 
+    fn emit_load_stack_pointer(
+        opcodes: &mut Vec<u8>) {
+        opcodes.push(LOAD_STACK_POINTER << 2);
+    }
+
     fn emit_push(
         opcodes: &mut Vec<u8>,
         register: u8) {
@@ -2029,6 +2065,10 @@ mod tests {
         opcodes.push(source & 0x03);
         opcodes.push(address as u8);
         opcodes.push((address >> 8)  as u8);
+    }
+
+    fn emit_store_stack_pointer(opcodes: &mut Vec<u8>) {
+        opcodes.push(STORE_STACK_POINTER << 2);
     }
 
     fn emit_add_with_carry_reg_reg(
@@ -2987,6 +3027,47 @@ mod tests {
     }
 
     #[test]
+    fn load_stack_pointer_loads_the_value_correctly() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_load_stack_pointer(&mut program);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 0x12;
+        cpu.registers.r2 = 0x49;
+        cpu.registers.r3 = 0x20;
+        cpu.registers.r4 = 0xFF;
+        execute_instruction(&mut cpu);
+
+        assert_eq!(0x4912, cpu.registers.sp);
+    }
+
+    #[test]
+    fn load_stack_pointer_does_not_affect_the_flags() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_load_stack_pointer(&mut program);
+        emit_load_stack_pointer(&mut program);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 0x12;
+        cpu.registers.r2 = 0x49;
+        cpu.registers.r3 = 0x20;
+        cpu.registers.r4 = 0xFF;
+
+        cpu.registers.flags = 0xFF;
+        execute_instruction(&mut cpu);
+        assert_eq!(0xFF, cpu.registers.flags);
+        
+        cpu.registers.flags = 0x00;
+        execute_instruction(&mut cpu);
+        assert_eq!(0x00, cpu.registers.flags);
+
+    }
+
+    #[test]
     fn store_immediate_generates_invalid_opcode_fault() {
         let mut cpu = create_test_cpu();
         let mut program = vec![];
@@ -3203,6 +3284,48 @@ mod tests {
 
         assert_eq!(0xDA, cpu.read(0x1234));
         assert_eq!(0x38, cpu.read(0x1235));
+    }
+
+    #[test]
+    fn store_stack_pointer_stores_correct_value() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_store_stack_pointer(&mut program);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.r1 = 0x00;
+        cpu.registers.r2 = 0x00;
+        cpu.registers.r3 = 0x00;
+        cpu.registers.r4 = 0x00;
+
+        cpu.registers.sp = 0x9876;
+        execute_instruction(&mut cpu);
+
+        assert_eq!(0x76, cpu.registers.r1);
+        assert_eq!(0x98, cpu.registers.r2);
+        assert_eq!(0x00, cpu.registers.r3);
+        assert_eq!(0x00, cpu.registers.r4);
+    }
+
+    #[test]
+    fn store_stack_pointer_does_not_affect_flags() {
+        let mut cpu = create_test_cpu();
+        let mut program = vec![];
+
+        emit_store_stack_pointer(&mut program);
+        emit_store_stack_pointer(&mut program);
+        update_program(&mut cpu, program, 0x2000);
+
+        cpu.registers.sp = 0x9876;
+
+        cpu.registers.flags = 0x00;
+        execute_instruction(&mut cpu);
+        assert_eq!(0x00, cpu.registers.flags);
+
+        cpu.registers.flags = 0xFF;
+        execute_instruction(&mut cpu);
+        assert_eq!(0xFF, cpu.registers.flags);
     }
 
     #[test]
